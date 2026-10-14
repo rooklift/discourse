@@ -336,8 +336,11 @@ test("system prompt template fills in every placeholder", () => {
 	cfg.show_thinking = true;
 	assert(build_system_prompt(cfg, cfg.participants[1]).includes("Summaries of your private reasoning are saved"));
 	assert(!s.includes("@Host: the room will wait"), "no host-floor note when the host is absent");
+	assert(s.includes("Host isn't watching this session live") && !s.includes("may join in"));
 	cfg.host_present = true;
-	assert(build_system_prompt(cfg, cfg.participants[1]).includes("The same goes for @Host: the room will wait for their reply."));
+	let present = build_system_prompt(cfg, cfg.participants[1]);
+	assert(present.includes("The same goes for @Host: the room will wait for their reply."));
+	assert(present.includes("Host may join in now and then") && !present.includes("isn't watching"));
 });
 
 async function until(predicate, ms = 1000) {

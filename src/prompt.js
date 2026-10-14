@@ -38,6 +38,9 @@ function build_system_prompt(cfg, me, template = null) {
 		"{{participants}}": participants_list(cfg, me),
 		"{{record_note}}": record_note(cfg),
 		"{{host_floor_note}}": cfg.host_present ? ` The same goes for @${cfg.host_name}: the room will wait for their reply.` : "",
+		"{{host_note}}": cfg.host_present
+			? `${cfg.host_name} may join in now and then; their messages are marked as coming from the host.`
+			: `${cfg.host_name} isn't watching this session live, so won't see or answer messages while it runs. When the conversation goes quiet, the room closes.`,
 		"{{date}}": date,
 	};
 
