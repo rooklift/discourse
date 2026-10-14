@@ -326,10 +326,22 @@ const room_prototype = {
 		if (entry.kind === "host") {
 			return `<message from="${this.cfg.host_name} (host)">\n${entry.text}\n</message>`;
 		}
-		if (entry.kind === "turn" && entry.author !== me.name && entry.text) {
-			return `<message from="${entry.author}">\n${entry.text}\n</message>`;
+		if (entry.kind === "turn" && entry.author !== me.name) {
+			if (entry.text) {
+				return `<message from="${entry.author}">\n${entry.text}\n</message>`;
+			}
+
+			// Others need to know a turn happened, or they may wait for someone who has
+			// already passed (as happened when the host asked one model to start).
+
+			if (entry.action === "pass") {
+				return `<notice>${entry.author} passed.</notice>`;
+			}
+			if (entry.action === "silent") {
+				return `<notice>${entry.author} had the floor but said nothing.</notice>`;
+			}
 		}
-		return "";								// Passes, errors and other models' silences are invisible.
+		return "";								// Errors and file activity stay invisible to the models.
 	},
 
 	build_view: function(me) {

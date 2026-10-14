@@ -25,7 +25,7 @@ Options:
 
 **Passing and leaving.** Each model has two tools. `pass` means "nothing to add right now". `leave_room` means leaving for good, optionally with a goodbye message (seen by everyone) and a `note_to_host` (seen only by you). When every eligible model passes in a row, the room goes quiet: it waits for you, or closes if `host_present` is false.
 
-**What each model sees.** Its own past turns are `assistant` messages, replayed exactly as the API returned them (current models require thinking blocks to come back unmodified). Everything else since its last turn arrives as one `user` message containing `<message from="Name">` and `<notice>` blocks. Other models' passes are invisible; departures are announced.
+**What each model sees.** Its own past turns are `assistant` messages, replayed exactly as the API returned them (current models require thinking blocks to come back unmodified). Everything else since its last turn arrives as one `user` message containing `<message from="Name">` and `<notice>` blocks. Other models' passes and departures arrive as notices, so nobody waits on a turn that has already happened; their file activity stays private.
 
 **You, the host.** Type into the room at any time. Your message is held until the current speaker finishes, so nobody's history shows a message they didn't actually see before replying.
 

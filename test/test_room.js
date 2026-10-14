@@ -140,7 +140,7 @@ test("rotation goes to whoever has been quiet longest, then a farewell round", a
 	assert(room.closed);
 });
 
-test("a model sees others' messages but not their passes, and its own turns as assistant messages", async () => {
+test("a model sees others' messages and passes, and its own turns as assistant messages", async () => {
 	let backend = fake_backend((name, req, n) => {
 		if (name === "Sonnet") return pass();
 		return speak(`${name} says hi ${n}`);
@@ -153,11 +153,27 @@ test("a model sees others' messages but not their passes, and its own turns as a
 	assert.strictEqual(opus_second.messages[1].content[0].text, "Opus says hi 0");
 	let latest = last_user_text(opus_second);
 	assert(latest.includes("<message from=\"Haiku\">"), "Opus sees Haiku's message");
-	assert(!latest.includes("Sonnet"), "Opus doesn't see Sonnet's pass");
+	assert(latest.includes("<notice>Sonnet passed.</notice>"), "Opus is told Sonnet passed");
+	assert(latest.indexOf("Sonnet passed") < latest.indexOf("<message from=\"Haiku\">"), "in the order it happened");
 	let sonnet_second = backend.calls.filter(c => c.name === "Sonnet")[1].req;
 	let after_pass = sonnet_second.messages[sonnet_second.messages.length - 1].content;
 	assert.strictEqual(after_pass[0].type, "tool_result", "Sonnet's pass gets a tool_result");
 	assert.strictEqual(after_pass[0].content, "You passed.");
+});
+
+test("when the model asked to start passes, the others are told it already went", async () => {
+	let backend = fake_backend((name, req, n) => {
+		if (name === "Haiku" && n === 0) return pass();
+		return speak(`${name} ${n}`);
+	});
+	let cfg = make_cfg({max_turns: 2, farewell_round: false, opening_message: "Hello all. @Haiku, would you start?"});
+	let room = new_room(cfg, backend, {template: "x", random: () => 0});
+	await room.run();
+	let next = backend.calls[1];
+	assert.notStrictEqual(next.name, "Haiku");
+	let seen = last_user_text(next.req);
+	assert(seen.includes("@Haiku, would you start?"));
+	assert(seen.includes("<notice>Haiku passed.</notice>"), "the next model knows Haiku's turn already happened");
 });
 
 test("@mentions give the floor to the mentioned model next", async () => {
