@@ -33,6 +33,7 @@ function attach_transcript(room, cfg) {
 		config: Object.assign({}, cfg, {
 			participants: cfg.participants.map(p => Object.assign({}, p, {price_tiers: undefined})),
 			opening_images: (cfg.opening_images || []).map(im => im.source),		// Names only; the images are saved below.
+			opening_files: (cfg.opening_files || []).map(f => f.name),			// Names only; the text is in the host entry.
 		}),
 		system_prompts: Object.fromEntries(room.participants.map(p => [p.name, p.system])),
 	});
@@ -85,7 +86,13 @@ function markdown_for(entry, cfg) {
 		for (let im of entry.images || []) {
 			s += `![Image ${im.number}: ${im.source}](${encodeURI(im.file)})\n\n`;
 		}
-		return s + (entry.text ? `${entry.text}\n\n` : "");
+		if (entry.text) {
+			s += `${entry.text}\n\n`;
+		}
+		for (let f of entry.files || []) {
+			s += `<details open><summary>File: ${f.name}</summary>\n\n${f.text}\n\n</details>\n\n`;
+		}
+		return s;
 	}
 
 	if (entry.kind === "tool_op") {

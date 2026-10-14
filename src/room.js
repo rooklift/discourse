@@ -211,8 +211,9 @@ const room_prototype = {
 			this.floor_queue.push(this.cfg.first_speaker);
 		}
 		let opening_images = Array.isArray(this.cfg.opening_images) ? this.cfg.opening_images : [];
-		if (this.cfg.opening_message || opening_images.length > 0) {
-			this.pending_host.push({text: this.cfg.opening_message || "", images: opening_images});
+		let opening_files = Array.isArray(this.cfg.opening_files) ? this.cfg.opening_files : [];
+		if (this.cfg.opening_message || opening_images.length > 0 || opening_files.length > 0) {
+			this.pending_host.push({text: this.cfg.opening_message || "", images: opening_images, files: opening_files});
 		}
 		this.emit_state();
 	},
@@ -336,15 +337,24 @@ const room_prototype = {
 		}
 		if (entry.kind === "host") {
 			let images = entry.images || [];
-			if (images.length === 0) {
-				return `<message from="${this.cfg.host_name} (host)">\n${entry.text}\n</message>`;
+			let files = entry.files || [];
+
+			// Shared text files go inside the message, each wrapped and named. Images are named in
+			// the message, then each follows with a label, as the vision docs suggest, so everyone
+			// can refer to "Image 2" later.
+
+			let body = entry.text ? [entry.text] : [];
+			for (let f of files) {
+				body.push(`<file name="${f.name}">\n${f.text}\n</file>`);
 			}
-
-			// The message names its images, then each follows with a label, as the vision docs
-			// suggest, so everyone can refer to "Image 2" later.
-
-			let names = images.map(im => `Image ${im.number}`).join(", ");
-			let blocks = [{type: "text", text: `<message from="${this.cfg.host_name} (host)">\n${entry.text ? entry.text + "\n" : ""}[shared ${images.length === 1 ? "an image" : "images"}: ${names}]\n</message>`}];
+			if (images.length > 0) {
+				body.push(`[shared ${images.length === 1 ? "an image" : "images"}: ${images.map(im => `Image ${im.number}`).join(", ")}]`);
+			}
+			let message = `<message from="${this.cfg.host_name} (host)">\n${body.join("\n")}\n</message>`;
+			if (images.length === 0) {
+				return message;
+			}
+			let blocks = [{type: "text", text: message}];
 			for (let im of images) {
 				blocks.push({type: "text", text: `Image ${im.number}, shared by ${this.cfg.host_name}:`});
 				blocks.push({type: "image", source: {type: "base64", media_type: im.media_type, data: im.data}});
@@ -770,16 +780,19 @@ const room_prototype = {
 
 	// Returns false if nothing was queued (empty, closed, or over the image limit).
 
-	host_say: function(text, images = []) {
+	// files: prepared text files from src/textfile.js ({name, text, lines, tokens}).
+
+	host_say: function(text, images = [], files = []) {
 		text = String(text ?? "").trim();
 		images = (Array.isArray(images) ? images : [images]).filter(Boolean);
-		if ((!text && images.length === 0) || this.closed) {
+		files = (Array.isArray(files) ? files : [files]).filter(Boolean);
+		if ((!text && images.length === 0 && files.length === 0) || this.closed) {
 			return false;
 		}
 		if (this.images_left() < images.length) {
 			return false;
 		}
-		this.pending_host.push({text, images});	// Applied between turns, so no model's history shows a
+		this.pending_host.push({text, images, files});	// Applied between turns, so no model's history shows a
 		this.wake();							// message it didn't actually see before replying.
 		return true;
 	},
@@ -793,8 +806,16 @@ const room_prototype = {
 		while (this.pending_host.length > 0) {
 			let m = this.pending_host.shift();
 			let images = (m.images || []).map(im => Object.assign({}, im, {number: ++this.image_count}));
-			this.append(images.length ? {kind: "host", text: m.text, images} : {kind: "host", text: m.text});
-			this.on_message(this.cfg.host_name, m.text);
+			let files = (m.files || []).map(f => ({name: f.name, text: f.text, lines: f.lines, tokens: f.tokens}));
+			let entry = {kind: "host", text: m.text};
+			if (images.length) {
+				entry.images = images;
+			}
+			if (files.length) {
+				entry.files = files;
+			}
+			this.append(entry);
+			this.on_message(this.cfg.host_name, m.text);		// Only the message itself can @mention, not a file's contents.
 			this.quiet = false;
 			this.awaiting_host = null;
 		}

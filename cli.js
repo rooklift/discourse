@@ -2,7 +2,7 @@
 
 // Terminal front end.
 //
-// Usage: node cli.js [--config path/to/config.json] [--random[=N]] [--image path]... [opening message...]
+// Usage: node cli.js [--config path/to/config.json] [--random[=N]] [--image path]... [--file path]... [opening message...]
 //
 // Any words after the options become the host's opening message, overriding opening_message
 // in the config. Use -- before a message that itself starts with a dash.
@@ -10,9 +10,11 @@
 // --random (or -r) adds N words (default 5) picked at random from the config's word_list to
 // the opening message, as an optional seed for the conversation.
 //
-// --image (or -i) attaches an image to the opening message. It can be given more than once.
+// --image (or -i) attaches an image to the opening message, and --file (or -f) a text file.
+// Both can be given more than once.
 
-const USAGE = "Usage: node cli.js [--config path/to/config.json] [--random[=N]] [--image path]... [opening message...]";
+const USAGE = "Usage: node cli.js [--config path/to/config.json] [--random[=N]] [--image path]... [--file path]... [opening message...]";
+const PASTE_MS = 40;						// Lines arriving closer together than this are a paste, not typing.
 const DEFAULT_RANDOM_WORDS = 5;
 
 const path = require("path");
@@ -23,11 +25,13 @@ const {new_room, MAX_IMAGES} = require("./src/room");
 const {attach_transcript} = require("./src/transcript");
 const {load_words, pick_words, word_seed_message} = require("./src/words");
 const {prepare_image} = require("./src/images");
+const {prepare_text_file} = require("./src/textfile");
 
 const COLORS = [36, 33, 32, 34, 31, 35];		// ANSI: cyan, yellow, green, blue, red, magenta.
 const USE_COLOR = process.stdout.isTTY;
 
 const HELP = `Type a message and press Enter to say it to the room. @Name gives that model the floor next.
+Pasting several lines sends them as one message (pasted lines never run as commands).
 
   /pause        Stop handing out the floor (the current speaker finishes first)
   /resume       Carry on; if the room went quiet, everyone may speak again;
@@ -35,6 +39,8 @@ const HELP = `Type a message and press Enter to say it to the room. @Name gives 
   /next Name    Give Name the floor next
   /image path [caption]
                 Share an image with the room (quote the path if it has spaces)
+  /file path [caption]
+                Share a text file with the room, as one message
   /who          Who is present, and what each has cost
   /cost         Total cost so far
   /end          Close the room, with a farewell round
@@ -70,7 +76,7 @@ function money(n) {
 
 function parse_args(argv) {
 
-	let opts = {config: path.join(__dirname, "config.json"), message: "", random: 0, images: []};
+	let opts = {config: path.join(__dirname, "config.json"), message: "", random: 0, images: [], files: []};
 	let words = [];
 
 	for (let i = 0; i < argv.length; i++) {
@@ -95,6 +101,11 @@ function parse_args(argv) {
 				throw new Error(`${arg} needs a path`);
 			}
 			opts.images.push(argv[++i]);
+		} else if (arg === "--file" || arg === "-f") {
+			if (i + 1 >= argv.length) {
+				throw new Error(`${arg} needs a path`);
+			}
+			opts.files.push(argv[++i]);
 		} else if (arg === "--help" || arg === "-h") {
 			opts.help = true;
 		} else if (arg.startsWith("-") && words.length === 0) {
@@ -134,6 +145,7 @@ async function main() {
 		for (let p of opts.images) {
 			cfg.opening_images.push(await prepare_image(p));
 		}
+		cfg.opening_files = opts.files.map(prepare_text_file);
 		if (cfg.opening_images.length > MAX_IMAGES) {
 			throw new Error(`At most ${MAX_IMAGES} images can be shared in a session.`);
 		}
@@ -157,6 +169,7 @@ async function main() {
 			print(dim(`-- ${entry.text}`));
 		} else if (entry.kind === "host") {
 			let shown = (entry.images || []).map(im => `[Image ${im.number}: ${im.source}, ${im.width}x${im.height}, about ${im.tokens} tokens]`);
+			shown.push(...(entry.files || []).map(f => `[File: ${f.name}, ${f.lines} line${f.lines === 1 ? "" : "s"}, about ${f.tokens} tokens]`));
 			if (entry.text) {
 				shown.push(entry.text);
 			}
@@ -238,7 +251,7 @@ async function main() {
 	if (cfg.host_present) {
 		print(dim("Type /help for commands."));
 		rl = readline.createInterface({input: process.stdin, output: process.stdout, prompt: "> "});
-		rl.on("line", (line) => handle_line(room, cfg, line));
+		rl.on("line", (line) => collect_line(room, cfg, line));
 		rl.on("SIGINT", on_interrupt);
 		rl.prompt();
 	} else {
@@ -250,6 +263,38 @@ async function main() {
 		console.error(error);
 		process.exit(1);
 	});
+}
+
+// A paste arrives as a burst of lines a few milliseconds apart, far faster than anyone types.
+// Gather each burst; a single line is handled as typed, and several become one message.
+
+let paste_lines = [];
+let paste_timer = null;
+
+function collect_line(room, cfg, line) {
+	paste_lines.push(line);
+	clearTimeout(paste_timer);
+	paste_timer = setTimeout(() => {
+		let lines = paste_lines;
+		paste_lines = [];
+		if (lines.length === 1) {
+			handle_line(room, cfg, lines[0]);
+		} else {
+			handle_paste(room, lines);
+		}
+	}, PASTE_MS);
+}
+
+function handle_paste(room, lines) {
+	let text = lines.join("\n").replace(/^\s*\n|\n\s*$/g, "");
+	if (text.trim()) {
+		room.host_say(text);
+		print(dim(`(Pasted ${lines.length} lines as one message.)`));
+		if (room.state().in_flight) {
+			print(dim("(Your message will appear when the current speaker finishes.)"));
+		}
+	}
+	rl.prompt();
 }
 
 function handle_line(room, cfg, line) {
@@ -274,6 +319,12 @@ function handle_line(room, cfg, line) {
 
 	if (cmd.toLowerCase() === "/image") {
 		share_image(room, s.slice(cmd.length).trim());
+		rl.prompt();
+		return;
+	}
+
+	if (cmd.toLowerCase() === "/file") {
+		share_file(room, s.slice(cmd.length).trim());
 		rl.prompt();
 		return;
 	}
@@ -346,6 +397,26 @@ function share_image(room, rest) {
 	}).catch(error => {
 		print(paint(`(Couldn't share the image: ${error.message})`, 31));
 	});
+}
+
+function share_file(room, rest) {
+	let {file, caption} = split_path_and_caption(rest);
+	if (!file) {
+		print(dim("(Usage: /file path [caption])"));
+		return;
+	}
+	let prepared;
+	try {
+		prepared = prepare_text_file(file);
+	} catch (error) {
+		print(paint(`(Couldn't share the file: ${error.message})`, 31));
+		return;
+	}
+	if (!room.host_say(caption, [], [prepared])) {
+		print(dim("(The file couldn't be shared: the room has closed.)"));
+	} else if (room.state().in_flight) {
+		print(dim("(Your file will appear when the current speaker finishes.)"));
+	}
 }
 
 main().catch(error => {

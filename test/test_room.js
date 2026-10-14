@@ -1354,6 +1354,75 @@ test("backend: strict schemas are sent normally, and unrelated 400s aren't retri
 	assert.strictEqual(bad.backend.strict_ok, true, "strict mode stays on");
 });
 
+// ------------------------------------------------------------------------------------------------
+// Text files the host shares.
+
+const {prepare_text_file, MAX_CHARS} = require("../src/textfile");
+
+test("text files: Windows line endings and BOM cleaned up; binary, empty and huge refused", () => {
+	let dir = temp_dir();
+	let p = path.join(dir, "reply.md");
+	fs.writeFileSync(p, "﻿\r\n\r\nOpus, I've read them.  \r\n\r\n1. **Notes.** One.\r\n2. Two.\r\n\r\n");
+	let f = prepare_text_file(p);
+	assert.strictEqual(f.name, "reply.md");
+	assert.strictEqual(f.text, "Opus, I've read them.\n\n1. **Notes.** One.\n2. Two.");
+	assert.strictEqual(f.lines, 4);
+	assert.strictEqual(f.tokens, Math.ceil(f.text.length / 4));
+
+	fs.writeFileSync(path.join(dir, "pic.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01]));
+	assert.throws(() => prepare_text_file(path.join(dir, "pic.png")), /doesn't look like a text file/);
+	fs.writeFileSync(path.join(dir, "blank.txt"), " \r\n\r\n ");
+	assert.throws(() => prepare_text_file(path.join(dir, "blank.txt")), /is empty/);
+	fs.writeFileSync(path.join(dir, "long.txt"), "x".repeat(MAX_CHARS + 1));
+	assert.throws(() => prepare_text_file(path.join(dir, "long.txt")), /too long/);
+	fs.writeFileSync(path.join(dir, "huge.txt"), Buffer.alloc(2 * 1024 * 1024, 0x61));
+	assert.throws(() => prepare_text_file(path.join(dir, "huge.txt")), /too large/);
+	assert.throws(() => prepare_text_file(path.join(dir, "missing.txt")), /File not found/);
+	assert.throws(() => prepare_text_file(dir), /Not a file/);
+	assert.throws(() => prepare_text_file(""), /No file given/);
+});
+
+test("text files in the room: one message for everyone, mentions only from the caption", async () => {
+	let dir = temp_dir();
+	let p = path.join(dir, "reply.md");
+	fs.writeFileSync(p, "Line one, @Sonnet.\n\n/quit\n2. Line three.");
+	let file = prepare_text_file(p);
+	let backend = fake_backend((name, req, n) => speak(`${name} ${n}`));
+	let cfg = make_cfg({max_turns: 3, farewell_round: false, transcript_dir: temp_dir(), opening_message: "Here's my reply, @Haiku.", opening_files: [file]});
+	let room = new_room(cfg, backend, {template: "x", random: () => 0});
+	let files = require("../src/transcript").attach_transcript(room, cfg);
+	await room.run();
+
+	assert.strictEqual(backend.calls[0].name, "Haiku", "the caption's @mention passes the floor");
+	assert.notStrictEqual(backend.calls[1].name, "Sonnet", "a mention inside the file doesn't");
+	assert.strictEqual(room.log.filter(e => e.kind === "host").length, 1, "one host message, however many lines");
+	for (let c of backend.calls) {
+		let text = last_user_text(c.req) + c.req.messages.map(m => m.content.filter(b => b.type === "text").map(b => b.text).join("")).join("");
+		assert(text.includes("<message from=\"Host (host)\">\nHere's my reply, @Haiku.\n<file name=\"reply.md\">\nLine one, @Sonnet.\n\n/quit\n2. Line three.\n</file>\n</message>"), `${c.name} sees the whole file in the message`);
+	}
+	assert(!room.closed || room.log.some(e => e.kind === "notice" && e.text === "The room is now closed."), "a /quit line in a file is just text");
+	let md = fs.readFileSync(files.md_path, "utf8");
+	assert(md.includes("Here's my reply, @Haiku.\n\n<details open><summary>File: reply.md</summary>\n\nLine one, @Sonnet."));
+	let meta = JSON.parse(fs.readFileSync(files.jsonl_path, "utf8").split("\n")[0]);
+	assert.deepStrictEqual(meta.config.opening_files, ["reply.md"]);
+});
+
+test("text files and images together in one message", async () => {
+	let dir = temp_dir();
+	let image = await prepare_image(await make_image(dir, "a.jpg", 100, 100));
+	fs.writeFileSync(path.join(dir, "n.txt"), "notes");
+	let file = prepare_text_file(path.join(dir, "n.txt"));
+	let backend = fake_backend((name, req, n) => speak(`${name} ${n}`));
+	let room = new_room(make_cfg({host_present: true, max_turns: 1, farewell_round: false}), backend, {template: "x", random: () => 0});
+	assert.strictEqual(room.host_say("both", [image], [file]), true);
+	assert.strictEqual(room.host_say("", [], [file]), true, "a file with no caption is fine");
+	await room.run();
+	let content = backend.calls[0].req.messages[0].content;
+	assert(content[0].text.includes("both\n<file name=\"n.txt\">\nnotes\n</file>\n[shared an image: Image 1]\n</message>"));
+	assert.strictEqual(content.filter(b => b.type === "image").length, 1);
+	assert(content.map(b => b.text || "").join("").includes("<message from=\"Host (host)\">\n<file name=\"n.txt\">"));
+});
+
 test("config: the name 'shared' is reserved", () => {
 	let dir = temp_dir();
 	let key = path.join(dir, "key.txt");
