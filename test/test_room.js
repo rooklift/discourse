@@ -1235,6 +1235,125 @@ test("images: numbered across messages, image-only messages allowed, and capped 
 	assert.strictEqual(room.images_left(), MAX_IMAGES - 3);
 });
 
+// ------------------------------------------------------------------------------------------------
+// Strict tool use, and what a model is told when a call is incomplete.
+
+test("a call missing its filename says so, instead of calling the filename invalid", () => {
+	let st = new_storage(temp_dir(), "Opus");
+	st.write("notes.md", "old notes", "t");
+	let r = run_file_tool(st, tool("append_file", {content: "\n## later session\nsome notes"}), "Opus");		// The real call.
+	assert.strictEqual(r.is_error, true);
+	assert.strictEqual(r.content, "Error: The call was missing filename (it included content). Say which file, for example \"notes.md\".");
+	assert(!r.content.includes("Invalid filename"));
+	r = run_file_tool(st, tool("edit_file", {filename: "notes.md", old_text: "old"}), "Opus");
+	assert.strictEqual(r.content, "Error: The call was missing new_text (it included filename, old_text).");
+	r = run_file_tool(st, tool("search_files", {}), "Opus");
+	assert.strictEqual(r.content, "Error: The call was missing query (it included nothing).");
+	assert.strictEqual(st.read("notes.md").text, "old notes", "nothing was changed");
+	assert(run_file_tool(st, tool("append_file", {filename: "notes.md.", content: "x"}), "Opus").content.includes("isn't allowed"), "a present but bad name still gets the name message");
+});
+
+test("strict tools: required fields only, schemas within the API's strict-mode rules", () => {
+	let {make_file_tools} = require("../src/storage");
+	let {UTILITY_TOOLS} = require("../src/utility_tools");
+	let {TOOLS} = require("../src/room");
+	for (let has_shared of [false, true]) {
+		let all = TOOLS.concat(UTILITY_TOOLS, make_file_tools(has_shared));
+		let strict = all.filter(t => t.strict);
+		assert.deepStrictEqual(strict.map(t => t.name), ["calculate", "seal_envelope", "open_envelope", "read_file", "search_files", "write_file", "append_file", "edit_file", "delete_file"]);
+		for (let t of all) {
+			assert.strictEqual(Boolean(t.strict), (t.input_schema.required || []).length > 0, `${t.name}: strict exactly when something is required`);
+		}
+		let optional = 0;
+		for (let t of strict) {
+			let schema = t.input_schema;
+			assert.strictEqual(schema.additionalProperties, false, `${t.name} sets additionalProperties: false`);
+			assert(schema.required.every(k => Object.hasOwn(schema.properties, k)), `${t.name}: required fields exist`);
+			let text = JSON.stringify(schema);
+			for (let banned of ["minimum", "maximum", "multipleOf", "minLength", "maxLength", "\"pattern\""]) {
+				assert(!text.includes(banned), `${t.name} uses ${banned}, which strict mode rejects`);
+			}
+			optional += Object.keys(schema.properties).filter(k => !schema.required.includes(k)).length;
+		}
+		assert(strict.length <= 20, "at most 20 strict tools per request");
+		assert(optional <= 24, `at most 24 optional parameters across strict tools (have ${optional})`);
+	}
+});
+
+// A fake API for the real backend: answers with a canned stream, or rejects strict schemas.
+
+function sse_reply(text) {
+	let events = [
+		["message_start", {type: "message_start", message: {id: "m", type: "message", role: "assistant", model: "x", content: [], stop_reason: null, stop_sequence: null, usage: {input_tokens: 5, output_tokens: 1}}}],
+		["content_block_start", {type: "content_block_start", index: 0, content_block: {type: "text", text: ""}}],
+		["content_block_delta", {type: "content_block_delta", index: 0, delta: {type: "text_delta", text}}],
+		["content_block_stop", {type: "content_block_stop", index: 0}],
+		["message_delta", {type: "message_delta", delta: {stop_reason: "end_turn", stop_sequence: null}, usage: {output_tokens: 3}}],
+		["message_stop", {type: "message_stop"}],
+	];
+	return new Response(events.map(([e, d]) => `event: ${e}\ndata: ${JSON.stringify(d)}\n\n`).join(""), {status: 200, headers: {"content-type": "text/event-stream"}});
+}
+
+function bad_request(message) {
+	return new Response(JSON.stringify({type: "error", error: {type: "invalid_request_error", message}}), {status: 400, headers: {"content-type": "application/json"}});
+}
+
+function fake_api_backend(respond) {
+	let sdk = require("@anthropic-ai/sdk");
+	let {new_backend} = require("../src/backend");
+	let warnings = [];
+	let bodies = [];
+	let backend = new_backend("k", {on_warning: (m) => warnings.push(m)});
+	backend.client = new sdk.Anthropic({apiKey: "k", maxRetries: 0, fetch: async (url, init) => {
+		let body = JSON.parse(init.body);
+		bodies.push(body);
+		return respond(body);
+	}});
+	return {backend, warnings, bodies};
+}
+
+function backend_request(tools) {
+	return {participant: {model: "claude-opus-5-5", max_tokens: 100, effort: ""}, system: "s", tools, show_thinking: false, cache_ttl: "5m",
+		messages: [{role: "user", content: [{type: "text", text: "hi"}]}]};
+}
+
+test("backend: if the API rejects strict schemas, it carries on without them and says so once", async () => {
+	let {make_file_tools} = require("../src/storage");
+	let tools = make_file_tools(true);
+	let {backend, warnings, bodies} = fake_api_backend((body) => body.tools.some(t => t.strict)
+		? bad_request("tools.3: strict mode is not supported for this schema")
+		: sse_reply("fine"));
+
+	let reply = await backend.send(backend_request(tools));
+	assert.strictEqual(reply.content[0].text, "fine");
+	assert.strictEqual(bodies.length, 2, "one rejected request, one retry");
+	assert(bodies[0].tools.some(t => t.strict) && !bodies[1].tools.some(t => t.strict));
+	assert.strictEqual(warnings.length, 1);
+	assert(warnings[0].includes("strict tool schemas") && warnings[0].includes("strict mode is not supported"));
+	assert(tools.some(t => t.strict), "the room's own tool list is left untouched");
+
+	await backend.send(backend_request(tools));
+	assert.strictEqual(bodies.length, 3, "later turns go straight to non-strict");
+	assert(!bodies[2].tools.some(t => t.strict));
+	assert.strictEqual(warnings.length, 1, "and the warning isn't repeated");
+});
+
+test("backend: strict schemas are sent normally, and unrelated 400s aren't retried", async () => {
+	let {make_file_tools} = require("../src/storage");
+	let ok = fake_api_backend(() => sse_reply("hello"));
+	await ok.backend.send(backend_request(make_file_tools(true)));
+	let sent = ok.bodies[0].tools.find(t => t.name === "append_file");
+	assert.strictEqual(sent.strict, true);
+	assert.strictEqual(sent.input_schema.additionalProperties, false);
+	assert.deepStrictEqual(ok.warnings, []);
+
+	let bad = fake_api_backend(() => bad_request("messages.1: roles must alternate"));
+	await assert.rejects(bad.backend.send(backend_request(make_file_tools(true))), /roles must alternate/);
+	assert.strictEqual(bad.bodies.length, 1, "no retry");
+	assert.deepStrictEqual(bad.warnings, []);
+	assert.strictEqual(bad.backend.strict_ok, true, "strict mode stays on");
+});
+
 test("config: the name 'shared' is reserved", () => {
 	let dir = temp_dir();
 	let key = path.join(dir, "key.txt");

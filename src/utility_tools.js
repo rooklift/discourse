@@ -51,6 +51,15 @@ const UTILITY_TOOLS = [
 	},
 ];
 
+// Tools with required fields use strict mode, so the API guarantees those fields are present.
+
+for (let t of UTILITY_TOOLS) {
+	if ((t.input_schema.required || []).length > 0) {
+		t.strict = true;
+		t.input_schema.additionalProperties = false;
+	}
+}
+
 const UTILITY_TOOL_NAMES = UTILITY_TOOLS.map(t => t.name);
 
 function whole_in_range(value, fallback, min, max, label) {

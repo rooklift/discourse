@@ -142,7 +142,7 @@ async function main() {
 		process.exit(1);
 	}
 
-	let room = new_room(cfg, new_backend(api_key));
+	let room = new_room(cfg, new_backend(api_key, {on_warning: (message) => print(paint(`(Warning: ${message})`, 33))}));
 	let files = attach_transcript(room, cfg);
 
 	let color_of = Object.create(null);

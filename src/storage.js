@@ -639,9 +639,29 @@ function make_file_tools(has_shared) {
 				description: "Optional: \"private\" (your own folder, the default) or \"shared\" (one folder that every model in the room can read and write).",
 			};
 		}
-		return {name: t.name, description: t.description, input_schema: {type: "object", properties, required: t.required}};
+		let tool = {name: t.name, description: t.description, input_schema: {type: "object", properties, required: t.required}};
+		return t.required.length ? make_strict(tool) : tool;
 	});
 }
+
+// Strict tool use makes the API guarantee that a call includes every required field, with the
+// right types (a model once called append_file with no filename at all). Strict schemas must
+// set additionalProperties to false. Tools with nothing required gain nothing, so stay as they are.
+
+function make_strict(tool) {
+	tool.strict = true;
+	tool.input_schema.additionalProperties = false;
+	return tool;
+}
+
+const REQUIRED_FIELDS = {
+	read_file: ["filename"],
+	search_files: ["query"],
+	write_file: ["filename", "content"],
+	append_file: ["filename", "content"],
+	edit_file: ["filename", "old_text", "new_text"],
+	delete_file: ["filename"],
+};
 
 const SHARED_VERBS = {write_file: null, append_file: "added to", edit_file: "edited", delete_file: "deleted"};
 
@@ -675,6 +695,17 @@ function run_file_tool(storages, tool_use, actor) {
 	let done = (content, summary, extra = {}) => Object.assign({content, is_error: false, summary: summary + in_folder, folder}, extra);
 
 	try {
+
+		// Say plainly when a field is missing altogether, and what the call did include, so a
+		// model doesn't conclude that a perfectly good filename was rejected.
+
+		let missing = (REQUIRED_FIELDS[tool_name] || []).filter(k => input[k] === undefined || input[k] === null);
+		if (missing.length > 0) {
+			let given = Object.keys(input).filter(k => input[k] !== undefined && input[k] !== null);
+			let example = missing.includes("filename") ? " Say which file, for example \"notes.md\"." : "";
+			throw new Error(`The call was missing ${missing.join(" and ")} (it included ${given.length ? given.join(", ") : "nothing"}).${example}`);
+		}
+
 		if (folder !== "private" && folder !== "shared") {
 			throw new Error("folder must be \"private\" or \"shared\".");
 		}
@@ -770,4 +801,4 @@ function run_file_tool(storages, tool_use, actor) {
 
 const FILE_TOOLS = make_file_tools(false);
 
-module.exports = {new_storage, make_file_tools, FILE_TOOLS, FILE_TOOL_NAMES, run_file_tool, LIMITS};
+module.exports = {new_storage, make_file_tools, make_strict, FILE_TOOLS, FILE_TOOL_NAMES, run_file_tool, LIMITS};
