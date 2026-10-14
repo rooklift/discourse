@@ -11,6 +11,7 @@ const DEFAULTS = {
 	host_present: true,				// If false, the room runs unattended and closes when it goes quiet.
 	system_prompt: "./system/standard.txt",
 	transcript_dir: "./transcripts",
+	word_list: "./words.txt",		// One word per line; used by the CLI's --random option.
 	show_thinking: false,			// Ask the API for thinking summaries, show them to the host and save them.
 	opening_message: "",			// Optional first message from the host.
 	first_speaker: "",				// Optional name of the participant who speaks first. Random if blank.
@@ -71,9 +72,13 @@ function load_config(config_path) {
 	if (!cfg.api_key_file) {
 		throw new Error("config needs \"api_key_file\": the path to a file containing your API key");
 	}
-	cfg.api_key_file = resolve_path(cfg.api_key_file, base_dir);
-	cfg.system_prompt = resolve_path(cfg.system_prompt, base_dir);
-	cfg.transcript_dir = resolve_path(cfg.transcript_dir, base_dir);
+	// Paths written in the config are relative to the config file. Defaults are relative to the
+	// program itself, so a config kept elsewhere still finds the bundled prompt and word list.
+
+	let app_dir = path.resolve(__dirname, "..");
+	for (let key of ["api_key_file", "system_prompt", "transcript_dir", "word_list"]) {
+		cfg[key] = resolve_path(cfg[key], Object.hasOwn(raw, key) ? base_dir : app_dir);
+	}
 
 	if (!["5m", "1h"].includes(cfg.cache_ttl)) {
 		throw new Error("cache_ttl must be \"5m\" or \"1h\"");

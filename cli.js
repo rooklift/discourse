@@ -2,12 +2,16 @@
 
 // Terminal front end.
 //
-// Usage: node cli.js [--config path/to/config.json] [opening message...]
+// Usage: node cli.js [--config path/to/config.json] [--random[=N]] [opening message...]
 //
 // Any words after the options become the host's opening message, overriding opening_message
 // in the config. Use -- before a message that itself starts with a dash.
+//
+// --random (or -r) adds N words (default 5) picked at random from the config's word_list to
+// the opening message, as an optional seed for the conversation.
 
-const USAGE = "Usage: node cli.js [--config path/to/config.json] [opening message...]";
+const USAGE = "Usage: node cli.js [--config path/to/config.json] [--random[=N]] [opening message...]";
+const DEFAULT_RANDOM_WORDS = 5;
 
 const path = require("path");
 const readline = require("readline");
@@ -15,6 +19,7 @@ const {load_config, read_api_key} = require("./src/config");
 const {new_backend} = require("./src/backend");
 const {new_room} = require("./src/room");
 const {attach_transcript} = require("./src/transcript");
+const {load_words, pick_words, word_seed_message} = require("./src/words");
 
 const COLORS = [36, 33, 32, 34, 31, 35];		// ANSI: cyan, yellow, green, blue, red, magenta.
 const USE_COLOR = process.stdout.isTTY;
@@ -60,14 +65,21 @@ function money(n) {
 
 function parse_args(argv) {
 
-	let opts = {config: path.join(__dirname, "config.json"), message: ""};
+	let opts = {config: path.join(__dirname, "config.json"), message: "", random: 0};
 	let words = [];
 
 	for (let i = 0; i < argv.length; i++) {
 		let arg = argv[i];
+		let random_match = /^(?:--random|-r)(?:=(.*))?$/.exec(arg);
 		if (arg === "--") {
 			words.push(...argv.slice(i + 1));
 			break;
+		} else if (random_match && words.length === 0) {
+			let n = random_match[1] === undefined ? DEFAULT_RANDOM_WORDS : Number(random_match[1]);
+			if (!Number.isInteger(n) || n < 1) {
+				throw new Error(`${arg}: the number of words must be a whole number, 1 or more`);
+			}
+			opts.random = n;
 		} else if (arg === "--config" || arg === "-c") {
 			if (i + 1 >= argv.length) {
 				throw new Error(`${arg} needs a path`);
@@ -101,13 +113,16 @@ function main() {
 		}
 		cfg = load_config(opts.config);
 		api_key = read_api_key(cfg);
+		if (opts.message) {
+			cfg.opening_message = opts.message;
+		}
+		if (opts.random) {
+			let seed = word_seed_message(pick_words(load_words(cfg.word_list), opts.random));
+			cfg.opening_message = cfg.opening_message ? `${cfg.opening_message}\n\n${seed}` : seed;
+		}
 	} catch (error) {
 		console.error(`Error: ${error.message}\n${USAGE}`);
 		process.exit(1);
-	}
-
-	if (opts.message) {
-		cfg.opening_message = opts.message;
 	}
 
 	let room = new_room(cfg, new_backend(api_key));

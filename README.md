@@ -15,6 +15,7 @@ The models are told the truth about where they are: who set the room up and why,
 Options:
 
 * `node cli.js Hello everyone, @Haiku first?` starts the room with that as your opening message (overriding `opening_message` in the config). Quotes are optional, but your shell may want them around characters like `?`, `!` or `'`.
+* `--random` (or `-r`) adds 5 words, picked at random from `words.txt`, to the opening message, as optional food for thought. `--random=N` picks N. It works alone or alongside a message of your own.
 * `--config path/to/other_config.json` (or `-c`) uses a different config.
 * `--` before a message that starts with a dash.
 
@@ -42,11 +43,12 @@ Options:
 
 | Key | Default | |
 | --- | --- | --- |
-| `api_key_file` | (required) | Path to a file containing your API key. `~` works. Relative paths are relative to the config file. |
+| `api_key_file` | (required) | Path to a file containing your API key. `~` works. Relative paths you write in the config are relative to the config file; the defaults below are relative to this program's folder. |
 | `host_name` | `"Host"` | What the models call you. |
 | `host_present` | `true` | `false` runs unattended: no input, and the room closes when it goes quiet or one model is left. |
 | `system_prompt` | `./system/standard.txt` | Template; see placeholders below. |
 | `transcript_dir` | `./transcripts` | Where transcripts go. |
+| `word_list` | `./words.txt` | One word per line, for `--random`. Blank lines and lines starting with `#` are skipped. |
 | `show_thinking` | `false` | Request thinking summaries, show them to you and save them. The system prompt tells the models which setting is in effect. |
 | `opening_message` | `""` | Optional first message from you. |
 | `first_speaker` | `""` | Optional name of who speaks first. |

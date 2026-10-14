@@ -412,6 +412,22 @@ test("pricing: cache reads and Haiku's long-prompt tier", () => {
 	assert.strictEqual(long.toFixed(4), "0.0500");
 });
 
+test("random words: distinct, from the list, and phrased correctly", () => {
+	let {load_words, pick_words, word_seed_message} = require("../src/words");
+	let list = load_words(path.join(__dirname, "..", "words.txt"));
+	assert(list.length > 2000);
+	for (let trial = 0; trial < 200; trial++) {
+		let picked = pick_words(list, 5);
+		assert.strictEqual(new Set(picked).size, 5);
+		assert(picked.every(w => list.includes(w)));
+	}
+	assert.strictEqual(pick_words(["a", "b"], 5).length, 2, "never more than the list holds");
+	assert.strictEqual(word_seed_message(["apricity", "petard", "ablaut"]),
+		"Here are 3 randomly selected words, as food for thought if you'd like some: apricity, petard and ablaut. Use them or ignore them, as you like.");
+	assert.strictEqual(word_seed_message(["apricity"]),
+		"Here's a randomly selected word, as food for thought if you'd like some: apricity. Use it or ignore it, as you like.");
+});
+
 // ------------------------------------------------------------------------------------------------
 
 (async () => {
