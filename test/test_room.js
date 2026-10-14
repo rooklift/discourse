@@ -87,8 +87,9 @@ function validate_request(req) {
 	}
 	assert.strictEqual(typeof req.system, "string");
 	let names = req.tools.map(t => t.name);
-	assert.deepStrictEqual(names.slice(0, 2), ["pass", "leave_room"]);
-	assert(names.length === 2 || names.length === 7, "either no file tools or all five");
+	assert.deepStrictEqual(names.slice(0, 4), ["pass", "leave_room", "roll_dice", "calculate"]);
+	assert.strictEqual(new Set(names).size, names.length, "tool names are unique");
+	assert(names.length === 4 || names.length === 11, "either no file tools or all seven");
 }
 
 // A fake backend. script(name, req, n) returns a response (or throws). Records all requests.
@@ -649,7 +650,7 @@ test("quitting mid-turn keeps the record of steps already taken", async () => {
 	assert.strictEqual(fs.readFileSync(path.join(root, "Opus", "notes.md"), "utf8"), "kept");
 	assert.strictEqual(at_close.turns, 1, "the interrupted turn was logged before 'closed' fired");
 	assert.strictEqual(at_close.turn_count, 1);
-	assert.deepStrictEqual(turns(room)[0].file_ops.map(o => o.summary), ["created notes.md (4 bytes)"]);
+	assert.deepStrictEqual(turns(room)[0].tool_ops.map(o => o.summary), ["created notes.md (4 bytes)"]);
 	let kinds = room.log.map(e => e.kind === "notice" ? e.text : e.kind);
 	assert(kinds.indexOf("turn") < kinds.indexOf("The room was closed by the host."), "turn before the closing notice");
 	let md = fs.readFileSync(files.md_path, "utf8");
@@ -724,7 +725,7 @@ test("storage: a full disk never damages the original file", () => {
 		assert.strictEqual(r.is_error, true);
 		assert.strictEqual(st.read("keep.md").text, "precious words", "edit failure left the original intact");
 
-		r = with_write_sync(fake, () => run_file_tool(st, tool("write_file", {filename: "keep.md", content: "overwritten"}), "t"));
+		r = with_write_sync(fake, () => run_file_tool(st, tool("write_file", {filename: "keep.md", content: "overwritten", overwrite: true}), "t"));
 		assert.strictEqual(r.is_error, true);
 		assert.strictEqual(st.read("keep.md").text, "precious words", "rewrite failure left the original intact");
 
@@ -774,7 +775,7 @@ test("storage: another session starting up mid-write doesn't break the write", (
 			new_storage(root, "Opus");				// A second session opens the same folder right now.
 		}
 		return real(...args);
-	}, () => run_file_tool(st, tool("write_file", {filename: "shared.md", content: "after"}), "t"));
+	}, () => run_file_tool(st, tool("write_file", {filename: "shared.md", content: "after", overwrite: true}), "t"));
 	assert(started, "the second session really started mid-write");
 	assert.strictEqual(r.is_error, false, r.content);
 	assert.strictEqual(st.read("shared.md").text, "after");
@@ -790,7 +791,7 @@ test("an event listener that quits mid-step stops the remaining tools", async ()
 	let room = new_room(cfg, backend, {template: "x", random: () => 0});
 	let files = require("../src/transcript").attach_transcript(room, cfg);
 	room.on("event", (e) => {
-		if (e.kind === "file_op") {
+		if (e.kind === "tool_op") {
 			room.host_quit();
 		}
 	});
@@ -805,7 +806,7 @@ test("an event listener that quits mid-step stops the remaining tools", async ()
 	assert.strictEqual(at_close.turns, 1, "the turn was recorded before 'closed' fired");
 	assert.strictEqual(room.log.length, at_close.log_length, "nothing was logged after closing");
 	let t = turns(room)[0];
-	assert.deepStrictEqual(t.file_ops.map(o => o.summary), ["created first.md (1 bytes)"]);
+	assert.deepStrictEqual(t.tool_ops.map(o => o.summary), ["created first.md (1 bytes)"]);
 	assert.strictEqual(t.steps[0].tool_results[1].content, "Not run: the room has closed.");
 	let md = fs.readFileSync(files.md_path, "utf8");
 	assert(md.indexOf("Total cost") > md.lastIndexOf("first.md"), "the summary comes last");
@@ -866,9 +867,9 @@ test("file operations reach the log and transcript as each step completes", asyn
 		before_reply: async (name, req, n) => {
 			if (name === "Opus" && n === 1) {				// During the second API call of the turn.
 				seen_mid_turn = {
-					log: room.log.some(e => e.kind === "file_op" && e.summary === "created notes.md (5 bytes)"),
+					log: room.log.some(e => e.kind === "tool_op" && e.summary === "created notes.md (5 bytes)"),
 					md: fs.readFileSync(files.md_path, "utf8").includes("Opus created notes.md (5 bytes)"),
-					jsonl: fs.readFileSync(files.jsonl_path, "utf8").includes("\"kind\":\"file_op\""),
+					jsonl: fs.readFileSync(files.jsonl_path, "utf8").includes("\"kind\":\"tool_op\""),
 				};
 			}
 		},
@@ -883,6 +884,173 @@ test("file operations reach the log and transcript as each step completes", asyn
 	assert(sonnet, "Sonnet had a turn after Opus");
 	assert(last_user_text(sonnet.req).includes("Done."), "Sonnet sees Opus's message");
 	assert(!last_user_text(sonnet.req).includes("notes.md"), "but not the file_op entry");
+});
+
+// ------------------------------------------------------------------------------------------------
+// The newer tools: append, search, overwrite protection, shared folder, dice, calculator.
+
+const {calculate} = require("../src/calc");
+const {run_utility_tool} = require("../src/utility_tools");
+
+test("calculator: arithmetic, precedence, functions and limits", () => {
+	let cases = {
+		"1+2*3": "7", "(1+2)*3": "9", "2^3^2": "512", "-2^2": "-4", "2**10": "1024", "2^-1": "0.5",
+		"100000/ln(10)": "43429.4481903252", "10!": "3628800", "comb(52,5)": "2598960", "perm(5,2)": "20",
+		"log(1000)": "3", "log(8,2)": "3", "17 % 5": "2", "0.1+0.2": "0.3", "gcd(84,36)": "12", "lcm(4,6)": "12",
+		"max(1,5,3)": "5", "1e3+.5": "1000.5", "PI*0": "0", "sqrt(16)+cbrt(27)": "7",
+	};
+	for (let [expr, want] of Object.entries(cases)) {
+		assert.strictEqual(calculate(expr), want, expr);
+	}
+	assert(calculate("e^100000").startsWith("Infinity"), "overflow is reported, not hidden");
+	for (let bad of ["", "1+", "(1", "1)", "1 2", "x", "foo(1)", "sqrt()", "atan2(1)", "0/0", "171!", "1.5!", "1+".repeat(300) + "1", "(".repeat(150) + "1" + ")".repeat(150)]) {
+		assert.throws(() => calculate(bad), undefined, `should refuse ${JSON.stringify(bad.slice(0, 30))}`);
+	}
+});
+
+test("calculator: model input can never run as code", () => {
+	let probes = ["process.exit(1)", "require('fs')", "constructor", "__proto__", "toString(1)", "valueOf()", "this", "globalThis",
+		"Math.max(1)", "max.constructor", "`1`", "1;2", "a=1", "[1]", "{}", "'x'", "\"x\"", "1 && 2", "eval(1)", "Function('')"];
+	for (let p of probes) {
+		assert.throws(() => calculate(p), undefined, `${p} should be refused`);
+	}
+	for (let bad of [null, undefined, 42, {}, [], {toString() { throw new Error("boom"); }}]) {
+		let r = run_utility_tool({name: "calculate", input: {expression: bad}}, "Opus");
+		assert.strictEqual(r.is_error, true);
+	}
+	assert.strictEqual(run_utility_tool({name: "calculate", input: {expression: "6*7"}}, "Opus").content, "6*7 = 42");
+});
+
+test("dice: defaults, ranges, bad input, and a fair spread", () => {
+	let r = run_utility_tool({name: "roll_dice", input: {}}, "Opus", () => 4);
+	assert.strictEqual(r.content, "You rolled a d6: 4. Everyone sees this result.");
+	assert.strictEqual(r.announce, "Opus rolled a d6: 4.");
+	let seq = [2, 5, 6];
+	r = run_utility_tool({name: "roll_dice", input: {sides: 6, count: 3}}, "Haiku", () => seq.shift());
+	assert.strictEqual(r.announce, "Haiku rolled 3d6: 2, 5, 6 (total 13).");
+	for (let input of [{sides: 1}, {sides: 1001}, {sides: 2.5}, {count: 0}, {count: 101}, {sides: "6"}, {count: {}}]) {
+		assert.strictEqual(run_utility_tool({name: "roll_dice", input}, "Opus").is_error, true, JSON.stringify(input));
+	}
+	let counts = [0, 0, 0, 0, 0, 0, 0];
+	for (let i = 0; i < 600; i++) {
+		let v = Number(/: (\d+)\./.exec(run_utility_tool({name: "roll_dice", input: {}}, "Opus").content)[1]);
+		counts[v]++;
+	}
+	assert.strictEqual(counts[0], 0);
+	assert(counts.slice(1).every(c => c > 50), `each face turns up: ${counts.slice(1)}`);
+});
+
+test("append_file: creates, adds a line break when needed, and respects limits", () => {
+	let st = new_storage(temp_dir(), "Opus");
+	let run = (input) => run_file_tool(st, tool("append_file", input), "Opus");
+	assert.strictEqual(run({filename: "log.md", content: "one"}).content, "Created log.md (now 3 bytes).");
+	run({filename: "log.md", content: "two"});
+	run({filename: "LOG.md", content: "\nthree\n"});
+	run({filename: "log.md", content: "four"});
+	assert.strictEqual(st.read("log.md").text, "one\ntwo\nthree\nfour");
+	st.write("big.md", "x".repeat(LIMITS.file_bytes - 2), "t");
+	assert.strictEqual(run({filename: "big.md", content: "yyy"}).is_error, true, "an append can't exceed the file limit");
+	assert.strictEqual(st.read("big.md").text.length, LIMITS.file_bytes - 2, "and the file is unchanged");
+	assert.strictEqual(run({filename: "log.md"}).is_error, true, "content is required");
+});
+
+test("search_files: plain text, case-insensitive by default, with line numbers", () => {
+	let st = new_storage(temp_dir(), "Opus");
+	st.write("a.md", "The Badger\nno match here\nbadger again", "t");
+	st.write("b.md", "a (badger) with [brackets] and .* stars", "t");
+	let search = (input) => run_file_tool(st, tool("search_files", input), "Opus");
+	assert.strictEqual(search({query: "badger"}).content, "a.md:1: The Badger\na.md:3: badger again\nb.md:1: a (badger) with [brackets] and .* stars");
+	assert.strictEqual(search({query: "Badger", case_sensitive: true}).content, "a.md:1: The Badger");
+	assert.strictEqual(search({query: "badger", filename: "b.md"}).content, "b.md:1: a (badger) with [brackets] and .* stars");
+	assert.strictEqual(search({query: ".*"}).content, "b.md:1: a (badger) with [brackets] and .* stars", "patterns are just text");
+	assert.strictEqual(search({query: "zebra"}).content, "No matches.");
+	st.write("many.md", "hit\n".repeat(150), "t");
+	assert(search({query: "hit"}).content.endsWith("(Stopped at 100 matches.)"));
+	for (let bad of [{}, {query: ""}, {query: 5}, {query: "x".repeat(201)}, {query: "a", filename: "../a.md"}, {query: "a", filename: {}}]) {
+		assert.strictEqual(search(bad).is_error, true, JSON.stringify(bad).slice(0, 40));
+	}
+});
+
+test("write_file won't replace a file the model hasn't read, unless asked to", () => {
+	let st = new_storage(temp_dir(), "Haiku");
+	st.write("notes.md", "from an earlier session", "t");
+	let write = (input) => run_file_tool(st, tool("write_file", input), "Haiku");
+	let r = write({filename: "notes.md", content: "new"});
+	assert.strictEqual(r.is_error, true);
+	assert(r.content.includes("you haven't read it in this session"));
+	assert.strictEqual(st.read("notes.md").text, "from an earlier session", "the predecessor's note survives");
+	run_file_tool(st, tool("read_file", {filename: "Notes.md"}), "Haiku");
+	assert.strictEqual(write({filename: "notes.md", content: "new"}).is_error, false, "fine once read");
+	assert.strictEqual(write({filename: "notes.md", content: "newer"}).is_error, false, "and after writing it yourself");
+	st.write("other.md", "old", "t");
+	assert.strictEqual(write({filename: "other.md", content: "replaced", overwrite: true}).is_error, false, "overwrite: true is explicit");
+	run_file_tool(st, tool("edit_file", {filename: "notes.md", old_text: "newer", new_text: "edited"}), "Haiku");
+	run_file_tool(st, tool("append_file", {filename: "notes.md", content: "more"}), "Haiku");
+	assert.strictEqual(write({filename: "notes.md", content: "still fine"}).is_error, false, "own edits and appends keep it current");
+	assert.strictEqual(write({filename: "brand-new.md", content: "x"}).is_error, false, "new files need no reading");
+});
+
+test("shared folder: a change by someone else since your read blocks a blind rewrite", () => {
+	let root = temp_dir();
+	let shared = new_storage(root, "shared");
+	let storages = (name) => ({private: new_storage(root, name), shared});
+	let opus = {key: "Opus", stamp: "Opus (Claude Opus 5.5, claude-opus-5-5)"};
+	let haiku = {key: "Haiku", stamp: "Haiku (Claude Haiku 5.5, claude-haiku-5-5)"};
+	let r = run_file_tool(storages("Opus"), tool("write_file", {folder: "shared", filename: "story.md", content: "Once"}), opus);
+	assert.strictEqual(r.announce, "Opus created story.md in the shared folder.");
+	assert.strictEqual(r.summary, "created story.md (4 bytes) in the shared folder");
+	run_file_tool(storages("Haiku"), tool("read_file", {folder: "shared", filename: "story.md"}), haiku);
+	r = run_file_tool(storages("Opus"), tool("append_file", {folder: "shared", filename: "story.md", content: "upon a time"}), opus);
+	assert.strictEqual(r.announce, "Opus added to story.md in the shared folder.");
+	r = run_file_tool(storages("Haiku"), tool("write_file", {folder: "shared", filename: "story.md", content: "Haiku's version"}), haiku);
+	assert.strictEqual(r.is_error, true);
+	assert(r.content.includes("has changed since you last read it"));
+	assert.strictEqual(shared.read("story.md").text, "Once\nupon a time", "Opus's addition survives");
+	run_file_tool(storages("Haiku"), tool("read_file", {folder: "shared", filename: "story.md"}), haiku);
+	assert.strictEqual(run_file_tool(storages("Haiku"), tool("write_file", {folder: "shared", filename: "story.md", content: "v2"}), haiku).is_error, false);
+	assert(shared.listing().includes("last written by Haiku (Claude Haiku 5.5, claude-haiku-5-5)"));
+	assert.strictEqual(run_file_tool(storages("Opus"), tool("read_file", {folder: "elsewhere", filename: "story.md"}), opus).is_error, true);
+	assert.strictEqual(run_file_tool({private: storages("Opus").private, shared: null}, tool("list_files", {folder: "shared"}), opus).content, "Error: There's no shared folder in this room.");
+	assert(!run_file_tool(storages("Opus"), tool("write_file", {filename: "mine.md", content: "x"}), opus).announce, "private changes aren't announced");
+});
+
+test("in the room: shared changes and dice are announced to others; private tools are not", async () => {
+	let root = temp_dir();
+	let backend = fake_backend((name, req, n) => {
+		if (name === "Opus" && n === 0) return file_step(
+			tool("write_file", {folder: "shared", filename: "story.md", content: "Once upon a time"}),
+			tool("write_file", {filename: "private.md", content: "secret"}),
+			tool("calculate", {expression: "6*7"}),
+			tool("roll_dice", {sides: 20}),
+		);
+		if (name === "Opus" && n === 1) return speak("Started a story in the shared folder.");
+		return speak(`${name} ${n}`);
+	});
+	let room = new_room(make_cfg({storage_dir: root, max_turns: 2, farewell_round: false}), backend, {template: "x", random: () => 0});
+	await room.run();
+
+	assert(fs.existsSync(path.join(root, "shared", "story.md")));
+	let seen = last_user_text(backend.calls.find(c => c.name === "Sonnet").req);
+	assert(seen.includes("<notice>Opus created story.md in the shared folder.</notice>"));
+	assert(/<notice>Opus rolled a d20: \d+\.<\/notice>/.test(seen), "the dice roll is public");
+	assert(!seen.includes("private.md") && !seen.includes("42"), "private files and calculations stay private");
+	let opus_step2 = backend.calls.filter(c => c.name === "Opus")[1].req;
+	let results = opus_step2.messages[opus_step2.messages.length - 1].content.map(b => b.content);
+	assert.strictEqual(results[2], "6*7 = 42", "Opus gets its calculation");
+	assert(/^You rolled a d20: \d+\./.test(results[3]));
+	let opus_later = backend.calls.filter(c => c.name === "Opus")[2];
+	assert(!opus_later || !last_user_text(opus_later.req).includes("Opus created story.md"), "no notice about your own change");
+	assert.deepStrictEqual(turns(room)[0].tool_ops.map(o => o.tool), ["write_file", "write_file", "calculate", "roll_dice"]);
+});
+
+test("config: the name 'shared' is reserved", () => {
+	let dir = temp_dir();
+	let key = path.join(dir, "key.txt");
+	fs.writeFileSync(key, "k");
+	let cfg_path = path.join(dir, "config.json");
+	let participants = [{name: "Opus", model: "claude-opus-5-5"}, {name: "Shared", model: "claude-haiku-5-5"}];
+	fs.writeFileSync(cfg_path, JSON.stringify({api_key_file: key, participants}));
+	assert.throws(() => require("../src/config").load_config(cfg_path), /reserved for the shared folder/);
 });
 
 test("storage: a folder replaced by a link after startup is refused", () => {
@@ -983,7 +1151,7 @@ test("a turn can use file tools, then speak; others see only the message", async
 	assert.strictEqual(t[0].author, "Opus");
 	assert.strictEqual(t[0].steps.length, 2);
 	assert.strictEqual(t[0].text, "I saved a note for next time.");
-	assert.deepStrictEqual(t[0].file_ops.map(o => o.summary), ["created notes.md (20 bytes)"]);
+	assert.deepStrictEqual(t[0].tool_ops.map(o => o.summary), ["created notes.md (20 bytes)"]);
 	assert.strictEqual(fs.readFileSync(path.join(root, "Opus", "notes.md"), "utf8"), "Remember the badger.");
 	assert(fs.existsSync(path.join(root, "Sonnet")) && fs.existsSync(path.join(root, "Haiku")), "every model gets a folder");
 
@@ -1024,12 +1192,14 @@ test("the system prompt describes the folder and lists its contents at the start
 	let cfg = make_cfg({storage_dir: root, system_prompt: path.join(__dirname, "..", "system", "standard.txt")});
 	let room = new_room(cfg, fake_backend(() => speak("x")));
 	let s = room.participants[1].system;
-	assert(s.includes("You have a folder of your own"));
+	assert(s.includes("You have a private folder of your own"));
+	assert(s.includes("There is also one shared folder"));
 	assert(s.includes("- diary.md (8 bytes"));
 	assert(s.includes("last written by Claude Sonnet 5.5 (claude-sonnet-5-5)"));
 	assert(room.participants[0].system.includes("(empty)"));
 	let without = new_room(make_cfg({system_prompt: cfg.system_prompt}), fake_backend(() => speak("x")));
 	assert(!without.participants[0].system.includes("folder of your own"));
+	assert(!without.participants[0].system.includes("shared folder"));
 	assert(!without.participants[0].system.includes("{{"));
 });
 

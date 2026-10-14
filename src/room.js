@@ -14,7 +14,8 @@
 const EventEmitter = require("events");
 const pricing = require("./pricing");
 const {build_system_prompt} = require("./prompt");
-const {new_storage, FILE_TOOLS, FILE_TOOL_NAMES, run_file_tool, LIMITS} = require("./storage");
+const {new_storage, make_file_tools, FILE_TOOL_NAMES, run_file_tool, LIMITS} = require("./storage");
+const {UTILITY_TOOLS, UTILITY_TOOL_NAMES, run_utility_tool} = require("./utility_tools");
 
 const TOOLS = [
 	{
@@ -56,19 +57,25 @@ function new_room(cfg, backend, opts = {}) {
 	let room = Object.create(room_prototype);
 	room.emitter = new EventEmitter();
 
+	// One folder every model can use, beside their private ones.
+
+	let shared = cfg.storage_dir ? new_storage(cfg.storage_dir, "shared") : null;
+	let file_tools = shared ? make_file_tools(true) : [];
+
 	Object.assign(room, {
 		cfg: cfg,
 		backend: backend,
+		shared_storage: shared,
 		random: opts.random || Math.random,		// Injectable for tests.
 
 		participants: cfg.participants.map(p => {
 			let storage = cfg.storage_dir ? new_storage(cfg.storage_dir, p.name) : null;
-			let storage_info = storage ? {listing: storage.listing(), limits: LIMITS} : null;
+			let storage_info = storage ? {listing: storage.listing(), shared_listing: shared.listing(), limits: LIMITS} : null;
 			return {
 				name: p.name,
 				cfg: p,
 				storage: storage,					// Private folder, or null if storage is off.
-				tools: storage ? TOOLS.concat(FILE_TOOLS) : TOOLS,
+				tools: TOOLS.concat(UTILITY_TOOLS, storage ? file_tools : []),
 				system: build_system_prompt(cfg, p, opts.template ?? null, storage_info),
 				present: true,
 				last_spoke: -1,						// Value of message_count when this model last spoke.
@@ -341,7 +348,10 @@ const room_prototype = {
 				return `<notice>${entry.author} had the floor but said nothing.</notice>`;
 			}
 		}
-		return "";								// Errors and file activity stay invisible to the models.
+		if (entry.kind === "tool_op" && entry.announce && entry.author !== me.name) {
+			return `<notice>${entry.announce}</notice>`;
+		}
+		return "";								// Errors and private tool use stay invisible to the models.
 	},
 
 	build_view: function(me) {
@@ -550,7 +560,7 @@ const room_prototype = {
 			stop_reason: response.stop_reason || "",
 			blocks: [],
 			tool_results: [],
-			file_ops: [],
+			tool_ops: [],
 			pass: false,
 			leave: null,
 			usage: usage,
@@ -574,8 +584,8 @@ const room_prototype = {
 			step.blocks = content.map(clean_block).filter(b => b !== null);
 		}
 
-		let author = `${p.cfg.full_name} (${p.cfg.model})`;
-		let used_files = false;
+		let actor = {key: p.name, stamp: `${p.name} (${p.cfg.full_name}, ${p.cfg.model})`};
+		let used_tools = false;
 
 		for (let t of tool_uses) {
 			if (this.closed) {						// Closed mid-step: run nothing more.
@@ -588,27 +598,30 @@ const room_prototype = {
 			} else if (t.name === "leave_room") {
 				step.leave = t;
 				step.tool_results.push({tool_use_id: t.id, content: "You have left the room."});
-			} else if (FILE_TOOL_NAMES.includes(t.name) && p.storage) {
-				used_files = true;
+			} else if ((FILE_TOOL_NAMES.includes(t.name) && p.storage) || UTILITY_TOOL_NAMES.includes(t.name)) {
+				used_tools = true;
 				let r;
 				try {
-					r = run_file_tool(p.storage, t, author);
-				} catch (error) {						// run_file_tool shouldn't throw, but a tool call must never end the session.
-					r = {content: "Error: the file tool failed unexpectedly.", is_error: true, summary: `tool ${t.name} failed unexpectedly`};
+					r = UTILITY_TOOL_NAMES.includes(t.name)
+						? run_utility_tool(t, p.name)
+						: run_file_tool({private: p.storage, shared: this.shared_storage}, t, actor);
+				} catch (error) {						// These shouldn't throw, but a tool call must never end the session.
+					r = {content: "Error: the tool failed unexpectedly.", is_error: true, summary: `tool ${t.name} failed unexpectedly`};
 				}
-				step.file_ops.push({tool: t.name, summary: r.summary, is_error: r.is_error});
+				step.tool_ops.push({tool: t.name, summary: r.summary, is_error: r.is_error});
 				step.tool_results.push({tool_use_id: t.id, content: r.content, is_error: r.is_error});
 
 				// Logged now, not at the end of the turn, so the transcript has it even if the
 				// session dies during a later step. The step is complete before listeners run.
+				// "announce" (dice rolls, changes to shared files) is shown to the other models.
 
-				this.append({kind: "file_op", author: p.name, tool: t.name, summary: r.summary, is_error: r.is_error});
+				this.append({kind: "tool_op", author: p.name, tool: t.name, summary: r.summary, is_error: r.is_error, announce: r.announce || ""});
 			} else {
 				step.tool_results.push({tool_use_id: t.id, content: `Unknown tool: ${t.name}`, is_error: true});
 			}
 		}
 
-		step.ends_turn = !(used_files && step.stop_reason === "tool_use" && !step.pass && !step.leave);
+		step.ends_turn = !(used_tools && step.stop_reason === "tool_use" && !step.pass && !step.leave);
 		return step;
 	},
 
@@ -631,7 +644,7 @@ const room_prototype = {
 			action: action,
 			text: text,
 			thinking: steps.flatMap(s => s.thinking),
-			file_ops: steps.flatMap(s => s.file_ops),
+			tool_ops: steps.flatMap(s => s.tool_ops),
 			note_to_host: note,
 			stop_reason: last.stop_reason,
 			limit_note: last.limit_note || "",

@@ -12,7 +12,7 @@ const DEFAULTS = {
 	system_prompt: "./system/standard.txt",
 	transcript_dir: "./transcripts",
 	word_list: "./words.txt",		// One word per line; used by the CLI's --random option.
-	storage_dir: "./storage",		// Each model gets a private folder in here, kept between sessions. "" turns this off.
+	storage_dir: "./storage",		// A private folder per model, plus "shared", kept between sessions. "" turns this off.
 	show_thinking: false,			// Ask the API for thinking summaries, show them to the host and save them.
 	opening_message: "",			// Optional first message from the host.
 	first_speaker: "",				// Optional name of the participant who speaks first. Random if blank.
@@ -109,6 +109,9 @@ function load_config(config_path) {
 		let lower = o.name.toLowerCase();
 		if (seen[lower] || lower === cfg.host_name.toLowerCase()) {
 			throw new Error(`participant name "${o.name}" is used twice (or clashes with host_name)`);
+		}
+		if (lower === "shared") {
+			throw new Error(`participant name "${o.name}" is reserved for the shared folder`);
 		}
 		seen[lower] = true;
 		if (!EFFORTS.includes(o.effort)) {

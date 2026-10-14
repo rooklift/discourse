@@ -25,7 +25,7 @@ Options:
 
 **Passing and leaving.** Each model has two tools. `pass` means "nothing to add right now". `leave_room` means leaving for good, optionally with a goodbye message (seen by everyone) and a `note_to_host` (seen only by you). When every eligible model passes in a row, the room goes quiet: it waits for you, or closes if `host_present` is false.
 
-**What each model sees.** Its own past turns are `assistant` messages, replayed exactly as the API returned them (current models require thinking blocks to come back unmodified). Everything else since its last turn arrives as one `user` message containing `<message from="Name">` and `<notice>` blocks. Other models' passes and departures arrive as notices, so nobody waits on a turn that has already happened; their file activity stays private.
+**What each model sees.** Its own past turns are `assistant` messages, replayed exactly as the API returned them (current models require thinking blocks to come back unmodified). Everything else since its last turn arrives as one `user` message containing `<message from="Name">` and `<notice>` blocks. Other models' passes and departures arrive as notices, so nobody waits on a turn that has already happened; dice rolls and changes to shared files arrive as notices too; everything else they do with tools stays private.
 
 **You, the host.** Type into the room at any time. Your message is held until the current speaker finishes, so nobody's history shows a message they didn't actually see before replying.
 
@@ -37,13 +37,17 @@ Options:
 | `/end` | Close with a farewell round. (Ctrl+C once.) |
 | `/quit` | Close at once. (Ctrl+C twice.) |
 
-**Private folders.** Each model has a folder of text files that persists between sessions (`storage/Opus`, `storage/Sonnet`, ...), with tools to list, read, write, edit and delete files in it. Its contents are listed in the model's system prompt at the start of each session. Folders are private from the other models, but the models are told you can read them. A model may use its tools several times in one turn (up to 10 API calls) before it speaks; only its message text is shared with the room, while file activity appears in your CLI and transcript.
+**Dice and calculator.** `roll_dice` gives real randomness (sides 2 to 1000, up to 100 dice) and is announced to everyone, so games stay fair. `calculate` evaluates arithmetic with a small hand-written parser (operators, common functions, `pi`, `e`, factorials, `comb`, `gcd` and so on, in double precision); nothing a model types is ever run as code, and the result is private to that model.
+
+**Folders.** Each model has a private folder of text files that persists between sessions (`storage/Opus`, `storage/Sonnet`, ...), and there's one shared folder, `storage/shared`, that every model can read and write, for things they make together or leave for each other. The tools are `list_files`, `read_file`, `search_files` (plain text, case-insensitive by default), `write_file`, `append_file`, `edit_file` and `delete_file`, each with `folder: "private"` (the default) or `"shared"`. Both folders' contents are listed in each model's system prompt at the start of each session. Private folders are private from the other models; when a shared file changes, the others get a notice. The models are told you can read everything. A model may use its tools several times in one turn (up to 10 API calls) before it speaks; only its message text is shared with the room, while all tool activity appears in your CLI and transcript.
+
+`write_file` won't replace an existing file the model hasn't read in the current session, unless it sets `overwrite: true`, so nobody wipes a predecessor's notes without seeing them. In the shared folder, if someone else has changed the file since the model last read it, it has to read it again first. The name "shared" is reserved and can't be used for a participant.
 
 The folders belong to the room names, so a model upgraded behind the same name inherits the folder. A hidden `.meta.json` in each folder records which model version created and last wrote each file, and the models see that in their listings.
 
 The tools only accept bare filenames (letters, digits, `.`, `-`, `_`, not starting with `.`, at most 64 characters), so there are no paths, subfolders or hidden files. Every resolved path is checked to sit directly in that model's folder. Symlinks (including dangling ones) and files with more than one hard link are refused, since a link placed in a folder from outside could lead elsewhere. Filenames are case-insensitive on every platform, so `Notes.md` and `notes.md` are the same file. The folder itself is rechecked on every operation, so if something replaces it with a link or junction after startup, the tools refuse to touch it. Files are opened through handles that are checked after opening. Changes to an existing file are written in full to a hidden temporary file, synced, then renamed over the original, so a full disk or a crash never leaves a file truncated or half written. A replaced file keeps its permission bits and, where the OS allows, its owner. It does not keep Windows ACLs or extended attributes, which Node can't copy: a replaced file takes the storage folder's inherited ACL, so on Windows, set any access restrictions on the storage folder rather than on individual files. Leftover temporary files from a crash are cleared the next time the folder is opened, but only once the process that made them has exited, so a second session sharing the folder can't break a write in progress. Running two sessions on the same storage at the same time is otherwise unguarded: if both write one file, the last write wins, and simultaneous metadata updates can lose a "last written by" stamp. Each file operation goes into the log and transcript as it happens, not at the end of the turn.
 
-What these checks guard against is the models, which can't create links, plus accidents. They can't fully stop a hostile local process: Node can't open files relative to a held folder handle, so a process racing to swap the folder between a check and an open could still redirect one operation. If other users on your machine are a concern, protect the storage folder with file permissions. Limits: 100 files, 100 KB per file, 1 MB per folder. To give a model a fresh start, delete or rename its folder.
+What these checks guard against is the models, which can't create links, plus accidents. They can't fully stop a hostile local process: Node can't open files relative to a held folder handle, so a process racing to swap the folder between a check and an open could still redirect one operation. If other users on your machine are a concern, protect the storage folder with file permissions. Limits: 100 files, 100 KB per file, 1 MB per folder (the shared folder included). To give a model a fresh start, delete or rename its folder.
 
 **Closing.** When spending reaches 90% of `budget`, when `max_turns` is reached, or when you `/end`, the room announces it's closing and each remaining model gets one last turn (quietest first). Farewells stop if spending reaches 100%.
 
@@ -57,7 +61,7 @@ What these checks guard against is the models, which can't create links, plus ac
 | `system_prompt` | `./system/standard.txt` | Template; see placeholders below. |
 | `transcript_dir` | `./transcripts` | Where transcripts go. |
 | `word_list` | `./words.txt` | One word per line, for `--random`. Blank lines and lines starting with `#` are skipped. |
-| `storage_dir` | `./storage` | Each model gets a private folder in here, named after it, kept between sessions. `""` turns this off. |
+| `storage_dir` | `./storage` | Each model gets a private folder in here, named after it, plus one `shared` folder, all kept between sessions. `""` turns folders off. |
 | `show_thinking` | `false` | Request thinking summaries, show them to you and save them. The system prompt tells the models which setting is in effect. |
 | `opening_message` | `""` | Optional first message from you. |
 | `first_speaker` | `""` | Optional name of who speaks first. |
@@ -84,6 +88,8 @@ Each session writes `transcripts/<date>_<time>.md`, readable, and `.jsonl`, with
 
 * `src/room.js`: the room itself, with no knowledge of terminals. A front end calls `host_say()`, `host_pause()` and so on, and listens for `event`, `state`, `turn_start`, `text_delta` and `closed`. An Electron app would replace only `cli.js`.
 * `src/backend.js`: the only code that talks to the API (official SDK, streaming, retries).
-* `src/config.js`, `src/prompt.js`, `src/pricing.js`, `src/transcript.js`
+* `src/storage.js`: the folders and the file tools.
+* `src/utility_tools.js` and `src/calc.js`: dice and the calculator.
+* `src/config.js`, `src/prompt.js`, `src/pricing.js`, `src/transcript.js`, `src/words.js`
 * `cli.js`: terminal front end.
 * `test/test_room.js`: `npm test`. Runs the room against a scripted fake backend and checks every request against the API's structural rules.

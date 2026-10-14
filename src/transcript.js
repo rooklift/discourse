@@ -61,7 +61,7 @@ function markdown_for(entry, cfg) {
 		return `**${cfg.host_name}** (host)\n\n${entry.text}\n\n`;
 	}
 
-	if (entry.kind === "file_op") {
+	if (entry.kind === "tool_op") {
 		return `> *${entry.author} ${entry.summary}.*\n\n`;
 	}
 

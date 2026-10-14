@@ -140,7 +140,7 @@ function main() {
 			print(dim(`-- ${entry.text}`));
 		} else if (entry.kind === "host") {
 			print(`${paint(cfg.host_name, 1)}: ${entry.text}`);
-		} else if (entry.kind === "file_op") {
+		} else if (entry.kind === "tool_op") {
 			print(paint(`(${entry.author} ${entry.summary})`, entry.is_error ? 31 : 2));
 		} else if (entry.kind === "error") {
 			print(paint(`Error${entry.author ? ` (${entry.author})` : ""}: ${entry.text}`, 31));

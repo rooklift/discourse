@@ -47,6 +47,8 @@ function new_storage(root_dir, name) {
 	let storage = Object.create(storage_prototype);
 	storage.folder = folder;
 	storage.real = fs.realpathSync(folder);		// Where the folder really is; rechecked on every use.
+	storage.versions = Object.create(null);		// Changes this session, per file (see version()).
+	storage.seen = Object.create(null);			// Per model: the version of each file it last saw in full.
 	remove_stale_temps(folder);
 	return storage;
 }
@@ -259,7 +261,92 @@ const storage_prototype = {
 			create_text(full, content);
 		}
 		this.stamp(name, author);
+		this.bump(name);
 		return {name, size, existed};
+	},
+
+	// Adds to the end of a file (creating it if need be), with a line break between the old
+	// and new content if there isn't one already.
+
+	append: function(filename, content, author) {
+		let name = this.canonical(filename);
+		if (!lexists(this.full_path(name))) {
+			let r = this.write(name, content, author);
+			return {name: r.name, size: r.size, created: true};
+		}
+		let {full} = this.existing(name);
+		let old = read_text(full);
+		let joiner = (old.length > 0 && !old.endsWith("\n") && !content.startsWith("\n")) ? "\n" : "";
+		let updated = old + joiner + content;
+		let size = Buffer.byteLength(updated, "utf8");
+		this.check_room(name, size);
+		replace_text(full, updated);
+		this.stamp(name, author);
+		this.bump(name);
+		return {name, size, created: false};
+	},
+
+	// Plain-text search across the folder (or one file). No regular expressions, so no
+	// pattern can be slow. Returns matching lines with line numbers.
+
+	search: function(query, opts = {}) {
+		if (typeof query !== "string" || !query) {
+			throw new Error("query must be a non-empty string.");
+		}
+		if (query.length > 200) {
+			throw new Error("query is too long (at most 200 characters).");
+		}
+		let case_sensitive = opts.case_sensitive === true;
+		let needle = case_sensitive ? query : query.toLowerCase();
+		let names = typeof opts.filename === "string" ? [this.existing(opts.filename).name] : this.files().map(f => f.name);
+		let matches = [];
+		let truncated = false;
+		for (let name of names) {
+			let text;
+			try {
+				text = read_text(this.existing(name).full);
+			} catch (error) {
+				continue;
+			}
+			let lines = text.split(/\r?\n/);
+			for (let i = 0; i < lines.length; i++) {
+				let hay = case_sensitive ? lines[i] : lines[i].toLowerCase();
+				if (hay.includes(needle)) {
+					if (matches.length >= 100) {
+						truncated = true;
+						break;
+					}
+					let line = lines[i].length > 200 ? lines[i].slice(0, 200) + "..." : lines[i];
+					matches.push({name, line_number: i + 1, line});
+				}
+			}
+		}
+		return {matches, truncated};
+	},
+
+	// Versions count changes made during this session, so the tools can tell whether a model
+	// has seen a file as it is now. Keys are lower case, as filenames are case-insensitive.
+
+	version: function(name) {
+		return this.versions[name.toLowerCase()] || 0;
+	},
+
+	bump: function(name) {
+		let key = name.toLowerCase();
+		this.versions[key] = (this.versions[key] || 0) + 1;
+	},
+
+	mark_seen: function(actor, name) {
+		if (!this.seen[actor]) {
+			this.seen[actor] = Object.create(null);
+		}
+		this.seen[actor][name.toLowerCase()] = this.version(name);
+	},
+
+	has_seen_current: function(actor, name) {
+		let mine = this.seen[actor];
+		let key = name.toLowerCase();
+		return Boolean(mine) && Object.hasOwn(mine, key) && mine[key] === this.version(name);
 	},
 
 	edit: function(filename, old_text, new_text, author) {
@@ -280,6 +367,7 @@ const storage_prototype = {
 		this.check_room(name, size);
 		replace_text(full, updated);
 		this.stamp(name, author);
+		this.bump(name);
 		return {name, size};
 	},
 
@@ -287,6 +375,7 @@ const storage_prototype = {
 		let {name, full} = this.existing(filename);
 		fs.unlinkSync(full);
 		this.forget(name);
+		this.bump(name);
 		return {name};
 	},
 };
@@ -472,63 +561,107 @@ function remove_stale_temps(folder) {
 // ------------------------------------------------------------------------------------------------
 // Tool definitions and dispatch, used by the room.
 
-const FILE_TOOLS = [
-	{
-		name: "list_files",
-		description: "List the files in your private folder, with sizes, dates, and which model version last wrote each one.",
-		input_schema: {type: "object", properties: {}},
-	},
-	{
-		name: "read_file",
-		description: "Read one file from your private folder.",
-		input_schema: {
-			type: "object",
-			properties: {filename: {type: "string", description: "Just the filename, e.g. notes.md. No folders."}},
+const FILE_TOOL_NAMES = ["list_files", "read_file", "search_files", "write_file", "append_file", "edit_file", "delete_file"];
+
+// The tool definitions, with a "folder" choice on each when the room has a shared folder.
+
+function make_file_tools(has_shared) {
+
+	let where = has_shared ? "your private folder, or the shared folder" : "your private folder";
+	let filename = {type: "string", description: "Just the filename, e.g. notes.md. No folders."};
+
+	let tools = [
+		{
+			name: "list_files",
+			description: `List the files in ${where}, with sizes, dates, and who last wrote each one.`,
+			props: {},
+			required: [],
+		},
+		{
+			name: "read_file",
+			description: `Read one file from ${where}.`,
+			props: {filename},
 			required: ["filename"],
 		},
-	},
-	{
-		name: "write_file",
-		description: "Create a file in your private folder, or replace one completely. For small changes to an existing file, edit_file is better.",
-		input_schema: {
-			type: "object",
-			properties: {
-				filename: {type: "string", description: "Just the filename, e.g. notes.md. No folders."},
+		{
+			name: "search_files",
+			description: `Search the files in ${where} for a piece of text (plain text, not a pattern; case-insensitive unless asked). Returns matching lines with filenames and line numbers.`,
+			props: {
+				query: {type: "string", description: "The text to look for."},
+				filename: {type: "string", description: "Optional: search just this file."},
+				case_sensitive: {type: "boolean", description: "Optional: match upper and lower case exactly. Default false."},
+			},
+			required: ["query"],
+		},
+		{
+			name: "write_file",
+			description: `Create a file in ${where}, or replace one completely. To replace a file that already exists, you must have read it in this session (and${has_shared ? ", in the shared folder," : ""} it mustn't have changed since), or set overwrite to true. To add to a file, use append_file; for small changes, edit_file.`,
+			props: {
+				filename,
 				content: {type: "string", description: "The whole new content of the file."},
+				overwrite: {type: "boolean", description: "Optional: replace an existing file even if you haven't read it as it is now."},
 			},
 			required: ["filename", "content"],
 		},
-	},
-	{
-		name: "edit_file",
-		description: "Change part of a file in your private folder by replacing one exact passage. old_text must appear exactly once in the file.",
-		input_schema: {
-			type: "object",
-			properties: {
-				filename: {type: "string", description: "Just the filename. No folders."},
+		{
+			name: "append_file",
+			description: `Add text to the end of a file in ${where}, creating the file if it doesn't exist. A line break is added between the old and new text if needed.`,
+			props: {
+				filename,
+				content: {type: "string", description: "The text to add."},
+			},
+			required: ["filename", "content"],
+		},
+		{
+			name: "edit_file",
+			description: `Change part of a file in ${where} by replacing one exact passage. old_text must appear exactly once in the file.`,
+			props: {
+				filename,
 				old_text: {type: "string", description: "The exact text to replace, appearing once in the file."},
 				new_text: {type: "string", description: "What to replace it with. Can be empty, to delete the passage."},
 			},
 			required: ["filename", "old_text", "new_text"],
 		},
-	},
-	{
-		name: "delete_file",
-		description: "Delete a file from your private folder. This can't be undone.",
-		input_schema: {
-			type: "object",
-			properties: {filename: {type: "string", description: "Just the filename. No folders."}},
+		{
+			name: "delete_file",
+			description: `Delete a file from ${where}. This can't be undone.`,
+			props: {filename},
 			required: ["filename"],
 		},
-	},
-];
+	];
 
-const FILE_TOOL_NAMES = FILE_TOOLS.map(t => t.name);
+	return tools.map(t => {
+		let properties = Object.assign({}, t.props);
+		if (has_shared) {
+			properties.folder = {
+				type: "string",
+				enum: ["private", "shared"],
+				description: "Optional: \"private\" (your own folder, the default) or \"shared\" (one folder that every model in the room can read and write).",
+			};
+		}
+		return {name: t.name, description: t.description, input_schema: {type: "object", properties, required: t.required}};
+	});
+}
 
-// Runs one file tool call. Returns {content, is_error, summary}; the summary is a short
-// description for the host's transcript.
+const SHARED_VERBS = {write_file: null, append_file: "added to", edit_file: "edited", delete_file: "deleted"};
 
-function run_file_tool(storage, tool_use, author) {
+// Runs one file tool call.
+//
+//   storages: {private, shared} (shared may be null). A single storage is accepted too.
+//   actor:    {key, stamp}: key identifies the model (for read tracking), stamp is what the
+//             metadata records as the writer. A plain string is used for both.
+//
+// Returns {content, is_error, summary, folder, name, announce}. The summary is for the host's
+// transcript; announce, set when a shared file changes, is a notice for the other models.
+
+function run_file_tool(storages, tool_use, actor) {
+
+	if (storages && storages.folder) {
+		storages = {private: storages, shared: null};
+	}
+	if (typeof actor === "string") {
+		actor = {key: actor, stamp: actor};
+	}
 
 	// Anything here may come straight from the model, so check types before using or even
 	// printing it: a filename could be an object whose toString throws.
@@ -536,44 +669,105 @@ function run_file_tool(storage, tool_use, author) {
 	let input = (tool_use.input && typeof tool_use.input === "object") ? tool_use.input : {};
 	let tool_name = typeof tool_use.name === "string" ? tool_use.name : "(unnamed tool)";
 	let shown = typeof input.filename === "string" ? JSON.stringify(input.filename.slice(0, 80)) : "";
+	let folder = input.folder === undefined ? "private" : input.folder;
+	let in_folder = folder === "shared" ? " in the shared folder" : "";
+
+	let done = (content, summary, extra = {}) => Object.assign({content, is_error: false, summary: summary + in_folder, folder}, extra);
 
 	try {
+		if (folder !== "private" && folder !== "shared") {
+			throw new Error("folder must be \"private\" or \"shared\".");
+		}
+		let storage = storages[folder];
+		if (!storage) {
+			throw new Error(folder === "shared" ? "There's no shared folder in this room." : "There's no private folder in this room.");
+		}
+
+		let announce = (verb, name) => folder === "shared" ? `${actor.key} ${verb} ${name} in the shared folder.` : "";
+
 		switch (tool_name) {
+
 		case "list_files":
-			return {content: storage.listing(), is_error: false, summary: "listed their files"};
+			return done(storage.listing(), "listed their files");
+
 		case "read_file": {
 			let r = storage.read(input.filename);
-			return {content: r.text.length > 0 ? r.text : "(the file is empty)", is_error: false, summary: `read ${r.name}`};
+			storage.mark_seen(actor.key, r.name);
+			return done(r.text.length > 0 ? r.text : "(the file is empty)", `read ${r.name}`, {name: r.name});
 		}
+
+		case "search_files": {
+			if (input.filename !== undefined && typeof input.filename !== "string") {
+				throw new Error("filename must be a string.");
+			}
+			let r = storage.search(input.query, {filename: input.filename, case_sensitive: input.case_sensitive});
+			let lines = r.matches.map(m => `${m.name}:${m.line_number}: ${m.line}`);
+			let text = lines.length ? lines.join("\n") : "No matches.";
+			if (r.truncated) {
+				text += "\n(Stopped at 100 matches.)";
+			}
+			let q = typeof input.query === "string" ? JSON.stringify(input.query.slice(0, 80)) : "";
+			return done(text, `searched for ${q} (${r.matches.length}${r.truncated ? "+" : ""} matches)`);
+		}
+
 		case "write_file": {
 			if (typeof input.content !== "string") {
 				throw new Error("content must be a string.");
 			}
-			let r = storage.write(input.filename, input.content, author);
-			return {
-				content: `${r.existed ? "Replaced" : "Created"} ${r.name} (${r.size} bytes).`,
-				is_error: false,
-				summary: `${r.existed ? "rewrote" : "created"} ${r.name} (${r.size} bytes)`,
-			};
+			let name = storage.canonical(input.filename);
+			if (storage.exists(name) && input.overwrite !== true && !storage.has_seen_current(actor.key, name)) {
+				let stale = storage.seen[actor.key] && Object.hasOwn(storage.seen[actor.key], name.toLowerCase());
+				throw new Error(stale
+					? `${name} has changed since you last read it. Read it again first, or set overwrite to true to replace it anyway.`
+					: `${name} already exists and you haven't read it in this session. Read it first, or set overwrite to true to replace it without reading.`);
+			}
+			let r = storage.write(name, input.content, actor.stamp);
+			storage.mark_seen(actor.key, r.name);
+			let verb = r.existed ? "rewrote" : "created";
+			return done(`${r.existed ? "Replaced" : "Created"} ${r.name} (${r.size} bytes).`, `${verb} ${r.name} (${r.size} bytes)`, {name: r.name, announce: announce(verb, r.name)});
 		}
+
+		case "append_file": {
+			if (typeof input.content !== "string") {
+				throw new Error("content must be a string.");
+			}
+			let name = storage.canonical(input.filename);
+			let was_current = storage.has_seen_current(actor.key, name);
+			let r = storage.append(name, input.content, actor.stamp);
+			if (r.created || was_current) {
+				storage.mark_seen(actor.key, r.name);
+			}
+			let verb = r.created ? "created" : "added to";
+			return done(`${r.created ? "Created" : "Added to"} ${r.name} (now ${r.size} bytes).`, `${verb} ${r.name} (now ${r.size} bytes)`, {name: r.name, announce: announce(verb, r.name)});
+		}
+
 		case "edit_file": {
 			if (typeof input.old_text !== "string" || typeof input.new_text !== "string") {
 				throw new Error("old_text and new_text must be strings.");
 			}
-			let r = storage.edit(input.filename, input.old_text, input.new_text, author);
-			return {content: `Edited ${r.name} (now ${r.size} bytes).`, is_error: false, summary: `edited ${r.name}`};
+			let name = storage.canonical(input.filename);
+			let was_current = storage.has_seen_current(actor.key, name);
+			let r = storage.edit(name, input.old_text, input.new_text, actor.stamp);
+			if (was_current) {
+				storage.mark_seen(actor.key, r.name);
+			}
+			return done(`Edited ${r.name} (now ${r.size} bytes).`, `edited ${r.name}`, {name: r.name, announce: announce(SHARED_VERBS.edit_file, r.name)});
 		}
+
 		case "delete_file": {
 			let r = storage.delete(input.filename);
-			return {content: `Deleted ${r.name}.`, is_error: false, summary: `deleted ${r.name}`};
+			return done(`Deleted ${r.name}.`, `deleted ${r.name}`, {name: r.name, announce: announce(SHARED_VERBS.delete_file, r.name)});
 		}
 		}
 	} catch (error) {
 		let message = typeof error?.message === "string" ? error.message : "something went wrong.";
-		return {content: `Error: ${message}`, is_error: true, summary: `tried ${tool_name}${shown ? ` on ${shown}` : ""}, error: ${message}`};
+		let where = (folder === "shared") ? " in the shared folder" : "";
+		return {content: `Error: ${message}`, is_error: true, summary: `tried ${tool_name}${shown ? ` on ${shown}` : ""}${where}, error: ${message}`, folder: typeof folder === "string" ? folder : "private"};
 	}
 
-	return {content: `Unknown tool: ${tool_name}`, is_error: true, summary: `unknown tool ${tool_name}`};
+	return {content: `Unknown tool: ${tool_name}`, is_error: true, summary: `unknown tool ${tool_name}`, folder: "private"};
 }
 
-module.exports = {new_storage, FILE_TOOLS, FILE_TOOL_NAMES, run_file_tool, LIMITS};
+const FILE_TOOLS = make_file_tools(false);
+
+module.exports = {new_storage, make_file_tools, FILE_TOOLS, FILE_TOOL_NAMES, run_file_tool, LIMITS};
