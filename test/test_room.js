@@ -721,14 +721,73 @@ test("storage: a full disk never damages the original file", () => {
 	assert.deepStrictEqual(st.files().map(f => f.name), ["keep.md"]);
 });
 
-test("storage: temporary files left by a crash are cleared, and never listed", () => {
+test("storage: crash leftovers are cleared, but another session's live temp files are not", () => {
 	let root = temp_dir();
 	let st = new_storage(root, "Opus");
-	fs.writeFileSync(path.join(st.folder, ".tmp-0123456789abcdef"), "debris");
-	assert.deepStrictEqual(st.files(), [], "not listed");
-	assert.throws(() => st.read(".tmp-0123456789abcdef"), /Invalid filename/, "not nameable");
+	let dead_pid = require("child_process").spawnSync(process.execPath, ["-e", ""]).pid;		// Has exited.
+	let plant = (name, age_ms = 0) => {
+		let full = path.join(st.folder, name);
+		fs.writeFileSync(full, "debris");
+		if (age_ms) {
+			let t = (Date.now() - age_ms) / 1000;
+			fs.utimesSync(full, t, t);
+		}
+	};
+	plant(`.tmp-${dead_pid}-aaaa`);					// Its writer has exited: debris.
+	plant(`.tmp-${process.ppid}-bbbb`);				// Its writer is alive (our parent process): in use.
+	plant(`.tmp-${process.pid}-cccc`);				// Our own process: in use.
+	plant(".tmp-0123456789abcdef");					// No process ID, recent: might be in use.
+	plant(".tmp-fedcba9876543210", 2 * 60 * 60 * 1000);			// No process ID, two hours old: debris.
+	plant(`.tmp-${process.ppid}-dddd`, 2 * 60 * 60 * 1000);		// Alive, but no write takes two hours: debris.
+
+	assert.deepStrictEqual(st.files(), [], "never listed");
+	assert.throws(() => st.read(".tmp-0123456789abcdef"), /Invalid filename/, "never nameable");
+
 	new_storage(root, "Opus");
-	assert.deepStrictEqual(leftovers(st), [], "cleared when the folder is next opened");
+	assert.deepStrictEqual(leftovers(st).sort(), [`.tmp-${process.pid}-cccc`, `.tmp-${process.ppid}-bbbb`, ".tmp-0123456789abcdef"].sort());
+});
+
+test("storage: another session starting up mid-write doesn't break the write", () => {
+	let root = temp_dir();
+	let st = new_storage(root, "Opus");
+	st.write("shared.md", "before", "t");
+	let started = false;
+	let r = with_write_sync((real, ...args) => {
+		if (!started) {
+			started = true;
+			new_storage(root, "Opus");				// A second session opens the same folder right now.
+		}
+		return real(...args);
+	}, () => run_file_tool(st, tool("write_file", {filename: "shared.md", content: "after"}), "t"));
+	assert(started, "the second session really started mid-write");
+	assert.strictEqual(r.is_error, false, r.content);
+	assert.strictEqual(st.read("shared.md").text, "after");
+});
+
+test("storage: replacing a file keeps its permissions", () => {
+	if (process.platform === "win32") {
+		return "skipped: Windows has no POSIX permission bits";
+	}
+	let st = new_storage(temp_dir(), "Opus");
+	let old_umask = process.umask(0o022);
+	try {
+		let mode_of = (name) => fs.statSync(path.join(st.folder, name)).mode & 0o777;
+		st.write("private.md", "secret one", "t");
+		fs.chmodSync(path.join(st.folder, "private.md"), 0o600);
+		st.write("private.md", "secret two", "t");
+		assert.strictEqual(mode_of("private.md"), 0o600, "rewrite keeps 0600 despite umask 022");
+		st.edit("private.md", "two", "three", "t");
+		assert.strictEqual(mode_of("private.md"), 0o600, "edit keeps 0600");
+		fs.chmodSync(path.join(st.folder, "private.md"), 0o640);
+		st.edit("private.md", "three", "four", "t");
+		assert.strictEqual(mode_of("private.md"), 0o640, "and 0640 stays 0640");
+		fs.chmodSync(path.join(st.folder, ".meta.json"), 0o600);
+		st.write("other.md", "x", "t");					// Rewrites the metadata file.
+		assert.strictEqual(mode_of(".meta.json"), 0o600, "the metadata file keeps its permissions too");
+		assert.strictEqual(mode_of("other.md"), 0o644, "new files follow the umask as usual");
+	} finally {
+		process.umask(old_umask);
+	}
 });
 
 test("file operations reach the log and transcript as each step completes", async () => {

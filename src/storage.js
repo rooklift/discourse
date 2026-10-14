@@ -351,12 +351,13 @@ function write_all(fd, text) {
 }
 
 // Creates a new file exclusively, writes it in full and syncs it. If anything fails, the
-// partly written file is removed.
+// partly written file is removed. With a mode, the file is created owner-only, written, and
+// only then given that exact mode (umask aside), so content is never more exposed than asked.
 
-function create_text(full, text) {
+function create_text(full, text, mode = null) {
 	let fd;
 	try {
-		fd = fs.openSync(full, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | NOFOLLOW);
+		fd = fs.openSync(full, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | NOFOLLOW, mode === null ? 0o666 : 0o600);
 	} catch (error) {
 		if (error.code === "EEXIST") {
 			throw new Error(`${path.basename(full)} appeared while being created. Try again.`);
@@ -366,6 +367,9 @@ function create_text(full, text) {
 	try {
 		write_all(fd, text);
 		fs.fsyncSync(fd);
+		if (mode !== null) {
+			fs.fchmodSync(fd, mode);
+		}
 	} catch (error) {
 		close_quietly(fd);
 		unlink_quietly(full);
@@ -374,12 +378,20 @@ function create_text(full, text) {
 	fs.closeSync(fd);
 }
 
-// Replaces an existing file's content without ever leaving it truncated or half written.
+// Replaces an existing file's content without ever leaving it truncated or half written, and
+// keeping its permissions. The temporary file's name carries our process ID, so another
+// session starting up can tell it's in use (see remove_stale_temps).
 
 function replace_text(full, text) {
-	close_quietly(open_checked(full, fs.constants.O_RDONLY));		// It must still be a plain file.
-	let temp = path.join(path.dirname(full), TEMP_PREFIX + crypto.randomBytes(8).toString("hex"));
-	create_text(temp, text);
+	let fd = open_checked(full, fs.constants.O_RDONLY);		// It must still be a plain file.
+	let mode;
+	try {
+		mode = fs.fstatSync(fd).mode & 0o777;
+	} finally {
+		close_quietly(fd);
+	}
+	let temp = path.join(path.dirname(full), `${TEMP_PREFIX}${process.pid}-${crypto.randomBytes(8).toString("hex")}`);
+	create_text(temp, text, mode);
 	try {
 		fs.renameSync(temp, full);
 	} catch (error) {
@@ -404,15 +416,43 @@ function unlink_quietly(full) {
 	}
 }
 
-// Temporary files left by a crash mid-write are cleared when the folder is opened.
+// Temporary files left by a crash mid-write are cleared when the folder is opened. Another
+// session may share the folder and be mid-write right now, so a temp file is only removed if
+// the process that made it has exited, or if it's over an hour old (a real write takes
+// milliseconds). Names without a recognisable process ID go by age alone.
+
+const STALE_TEMP_MS = 60 * 60 * 1000;
+
+function process_running(pid) {
+	try {
+		process.kill(pid, 0);						// Signal 0 only checks that the process exists.
+		return true;
+	} catch (error) {
+		return error.code === "EPERM";				// Exists, but belongs to someone else.
+	}
+}
 
 function remove_stale_temps(folder) {
 	for (let name of fs.readdirSync(folder)) {
-		if (name.startsWith(TEMP_PREFIX)) {
-			let full = path.join(folder, name);
-			if (fs.lstatSync(full).isFile()) {
-				unlink_quietly(full);
-			}
+		if (!name.startsWith(TEMP_PREFIX)) {
+			continue;
+		}
+		let full = path.join(folder, name);
+		let st;
+		try {
+			st = fs.lstatSync(full);
+		} catch (error) {
+			continue;								// Gone already: renamed or cleaned by its owner.
+		}
+		if (!st.isFile()) {
+			continue;
+		}
+		let match = /^\.tmp-(\d+)-/.exec(name);
+		let pid = match ? Number(match[1]) : null;
+		let old = Date.now() - st.mtimeMs > STALE_TEMP_MS;
+		let orphaned = pid !== null && pid !== process.pid && !process_running(pid);
+		if (old || orphaned) {
+			unlink_quietly(full);
 		}
 	}
 }
