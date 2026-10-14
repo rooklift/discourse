@@ -45,6 +45,7 @@ function new_storage(root_dir, name) {
 
 	let storage = Object.create(storage_prototype);
 	storage.folder = folder;
+	storage.real = fs.realpathSync(folder);		// Where the folder really is; rechecked on every use.
 	return storage;
 }
 
@@ -66,8 +67,25 @@ const storage_prototype = {
 	// "notes.md" are the same file everywhere, so quotas and metadata can't split between
 	// two spellings. Returns the spelling of the existing file if there is one.
 
+	// The folder must still be the same real directory it was at startup. If something has
+	// replaced it, or anything above it, with a link or junction, refuse to touch it.
+
+	guard: function() {
+		let ok = false;
+		try {
+			let st = fs.lstatSync(this.folder);
+			ok = st.isDirectory() && !st.isSymbolicLink() && fs.realpathSync(this.folder) === this.real;
+		} catch (error) {
+			ok = false;
+		}
+		if (!ok) {
+			throw new Error("Your folder isn't available right now.");
+		}
+	},
+
 	canonical: function(filename) {
 		this.validate(filename);
+		this.guard();
 		let names = fs.readdirSync(this.folder);
 		if (names.includes(filename)) {
 			return filename;
@@ -112,6 +130,7 @@ const storage_prototype = {
 	},
 
 	files: function() {
+		this.guard();
 		let out = [];
 		for (let name of fs.readdirSync(this.folder)) {
 			if (!NAME_RE.test(name)) {
@@ -134,7 +153,7 @@ const storage_prototype = {
 			if (!usable(fs.lstatSync(full))) {
 				return meta;
 			}
-			let o = JSON.parse(fs.readFileSync(full, "utf8"));
+			let o = JSON.parse(read_text(full));
 			if (o && typeof o === "object" && !Array.isArray(o)) {
 				for (let key of Object.keys(o)) {
 					if (o[key] && typeof o[key] === "object") {
@@ -150,10 +169,16 @@ const storage_prototype = {
 
 	write_meta: function(meta) {
 		let full = path.join(this.folder, META_FILE);
-		if (lexists(full) && !usable(fs.lstatSync(full))) {
-			return;								// Never write through a link.
+		let text = JSON.stringify(meta, null, "\t") + "\n";
+		try {
+			if (lexists(full)) {
+				replace_text(full, text);
+			} else {
+				create_text(full, text);
+			}
+		} catch (error) {
+			// Metadata is a convenience; never let it break a file operation.
 		}
-		fs.writeFileSync(full, JSON.stringify(meta, null, "\t") + "\n");
 	},
 
 	stamp: function(name, author) {
@@ -214,7 +239,7 @@ const storage_prototype = {
 
 	read: function(filename) {
 		let {name, full} = this.existing(filename);
-		return {name, text: fs.readFileSync(full, "utf8")};
+		return {name, text: read_text(full)};
 	},
 
 	write: function(filename, content, author) {
@@ -226,7 +251,11 @@ const storage_prototype = {
 		}
 		let size = Buffer.byteLength(content, "utf8");
 		this.check_room(name, size);
-		fs.writeFileSync(full, content, "utf8");
+		if (existed) {
+			replace_text(full, content);
+		} else {
+			create_text(full, content);
+		}
 		this.stamp(name, author);
 		return {name, size, existed};
 	},
@@ -236,7 +265,7 @@ const storage_prototype = {
 		if (!old_text) {
 			throw new Error("old_text can't be empty.");
 		}
-		let content = fs.readFileSync(full, "utf8");
+		let content = read_text(full);
 		let first = content.indexOf(old_text);
 		if (first === -1) {
 			throw new Error(`old_text wasn't found in ${name}. It has to match exactly, including spaces and line breaks.`);
@@ -247,7 +276,7 @@ const storage_prototype = {
 		let updated = content.slice(0, first) + new_text + content.slice(first + old_text.length);
 		let size = Buffer.byteLength(updated, "utf8");
 		this.check_room(name, size);
-		fs.writeFileSync(full, updated, "utf8");
+		replace_text(full, updated);
 		this.stamp(name, author);
 		return {name, size};
 	},
@@ -264,6 +293,66 @@ const storage_prototype = {
 
 function usable(st) {
 	return st.isFile() && !st.isSymbolicLink() && st.nlink === 1;
+}
+
+// All file I/O goes through handles that are checked after opening, so a file swapped for a
+// link between our check and the open is still refused. O_NOFOLLOW refuses a symlink at the
+// moment of opening where the platform supports it (not Windows, where the checks still apply).
+// New files are created exclusively, which never follows an existing link.
+//
+// What this can't stop: Node has no way to open a file relative to a held folder handle, so a
+// local process racing to swap the folder itself between our check and the open could still
+// redirect one operation. Against a hostile local user, use file permissions.
+
+const NOFOLLOW = fs.constants.O_NOFOLLOW || 0;
+
+function open_checked(full, flags) {
+	let fd = fs.openSync(full, flags | NOFOLLOW);
+	try {
+		if (!usable(fs.fstatSync(fd))) {
+			throw new Error(`${path.basename(full)} isn't a plain file and can't be used.`);
+		}
+		return fd;
+	} catch (error) {
+		fs.closeSync(fd);
+		throw error;
+	}
+}
+
+function read_text(full) {
+	let fd = open_checked(full, fs.constants.O_RDONLY);
+	try {
+		return fs.readFileSync(fd, "utf8");
+	} finally {
+		fs.closeSync(fd);
+	}
+}
+
+function replace_text(full, text) {
+	let fd = open_checked(full, fs.constants.O_WRONLY);		// No O_TRUNC: check first, then truncate.
+	try {
+		fs.ftruncateSync(fd, 0);
+		fs.writeSync(fd, text, 0, "utf8");
+	} finally {
+		fs.closeSync(fd);
+	}
+}
+
+function create_text(full, text) {
+	let fd;
+	try {
+		fd = fs.openSync(full, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | NOFOLLOW);
+	} catch (error) {
+		if (error.code === "EEXIST") {
+			throw new Error(`${path.basename(full)} appeared while being created. Try again.`);
+		}
+		throw error;
+	}
+	try {
+		fs.writeSync(fd, text, 0, "utf8");
+	} finally {
+		fs.closeSync(fd);
+	}
 }
 
 // ------------------------------------------------------------------------------------------------

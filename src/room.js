@@ -95,6 +95,7 @@ function new_room(cfg, backend, opts = {}) {
 		quiet: false,
 		awaiting_host: null,					// Name of the model that handed the floor to the host, if any.
 		in_flight: null,						// Name of the model whose request is running.
+		turn_in_progress: null,					// {p, steps} of the running turn, for host_quit().
 		abort_controller: null,
 		close_request: null,					// {reason, farewell} once something has asked the room to close.
 		closing: false,
@@ -397,9 +398,26 @@ const room_prototype = {
 		// A turn is a short loop: while the model is using its file tools, run them and call
 		// again, so it can read or write before it speaks. Anything else ends the turn.
 
+		// The turn in progress is visible to host_quit(), which records any steps already taken
+		// (files already written) before it closes the room, since closing may end the process.
+
 		let steps = [];
+		let turn = {p, steps};
+		this.turn_in_progress = turn;
 		let conversation = messages.slice();
 		let failure = null;
+
+		let stop_quietly = () => {
+			this.in_flight = null;
+			this.abort_controller = null;
+			if (this.turn_in_progress === turn) {	// Not already recorded by host_quit().
+				this.turn_in_progress = null;
+				if (steps.length > 0) {
+					this.record_turn(p, steps);
+				}
+			}
+			this.emit_state();
+		};
 
 		while (true) {
 
@@ -418,16 +436,16 @@ const room_prototype = {
 				});
 			} catch (error) {
 				if (this.closed || (this.backend.is_abort_error && this.backend.is_abort_error(error))) {
-					this.in_flight = null;
-					this.abort_controller = null;
-					if (steps.length > 0) {
-						this.record_turn(p, steps);		// Steps already taken (files written) stay on the record.
-					}
-					this.emit_state();
+					stop_quietly();
 					return;
 				}
 				failure = error;
 				break;
+			}
+
+			if (this.closed) {						// A reply that arrived after /quit: don't act on it.
+				stop_quietly();
+				return;
 			}
 
 			let turn_text = steps.map(s => s.text).concat(response_text(response)).join("");
@@ -452,6 +470,7 @@ const room_prototype = {
 
 		this.in_flight = null;
 		this.abort_controller = null;
+		this.turn_in_progress = null;
 
 		if (steps.length > 0) {
 			this.consecutive_errors = 0;
@@ -726,6 +745,11 @@ const room_prototype = {
 		}
 		if (this.abort_controller) {
 			this.abort_controller.abort();
+		}
+		let turn = this.turn_in_progress;			// Record what the interrupted turn already did,
+		this.turn_in_progress = null;				// before "closed" lets the front end exit.
+		if (turn && turn.steps.length > 0) {
+			this.record_turn(turn.p, turn.steps);
 		}
 		this.notice("The room was closed by the host.");
 		this.finish("quit");

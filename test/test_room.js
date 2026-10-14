@@ -614,12 +614,84 @@ test("quitting mid-turn keeps the record of steps already taken", async () => {
 			}
 		},
 	});
+	let cfg = make_cfg({storage_dir: root, host_present: true, transcript_dir: temp_dir()});
+	room = new_room(cfg, backend, {template: "x", random: () => 0});
+	let files = require("../src/transcript").attach_transcript(room, cfg);
+
+	// The CLI exits as soon as "closed" fires, so everything must be on record by then.
+
+	let at_close = null;
+	room.on("closed", () => {
+		at_close = {
+			turns: turns(room).length,
+			turn_count: room.turn_count,
+			md: fs.readFileSync(files.md_path, "utf8"),
+		};
+	});
+	await room.run();
+
+	assert.strictEqual(fs.readFileSync(path.join(root, "Opus", "notes.md"), "utf8"), "kept");
+	assert.strictEqual(at_close.turns, 1, "the interrupted turn was logged before 'closed' fired");
+	assert.strictEqual(at_close.turn_count, 1);
+	assert.deepStrictEqual(turns(room)[0].file_ops.map(o => o.summary), ["created notes.md (4 bytes)"]);
+	let kinds = room.log.map(e => e.kind === "notice" ? e.text : e.kind);
+	assert(kinds.indexOf("turn") < kinds.indexOf("The room was closed by the host."), "turn before the closing notice");
+	let md = fs.readFileSync(files.md_path, "utf8");
+	assert(md.indexOf("created notes.md") !== -1 && md.indexOf("created notes.md") < md.indexOf("Total cost"), "transcript has the file op before the summary");
+	assert(md.includes("- Opus: 1 turns"), "the summary counts the turn");
+	assert.strictEqual(turns(room).length, 1, "and it wasn't recorded twice");
+});
+
+test("a reply that arrives after /quit isn't acted on", async () => {
+	let root = temp_dir();
+	let room;
+	let backend = fake_backend((name, req, n) => {
+		return file_step(tool("write_file", {filename: "late.md", content: "should not exist"}));
+	}, {
+		before_reply: async (name, req, n) => {
+			room.host_quit();							// The request still resolves normally afterwards.
+		},
+	});
 	room = new_room(make_cfg({storage_dir: root, host_present: true}), backend, {template: "x", random: () => 0});
 	await room.run();
-	assert.strictEqual(fs.readFileSync(path.join(root, "Opus", "notes.md"), "utf8"), "kept");
-	let t = turns(room);
-	assert.strictEqual(t.length, 1, "the interrupted turn is in the log");
-	assert.deepStrictEqual(t[0].file_ops.map(o => o.summary), ["created notes.md (4 bytes)"]);
+	assert(!fs.existsSync(path.join(root, "Opus", "late.md")), "no file tool ran after the room closed");
+	assert.strictEqual(turns(room).length, 0);
+});
+
+test("storage: a folder replaced by a link after startup is refused", () => {
+	let root = temp_dir();
+	let st = new_storage(root, "Opus");
+	st.write("mine.txt", "hello", "t");
+
+	let outside = path.join(root, "outside");
+	fs.mkdirSync(outside);
+	fs.writeFileSync(path.join(outside, "secret.txt"), "outside");
+
+	fs.renameSync(st.folder, path.join(root, "Opus-moved"));
+	if (!try_symlink(outside, st.folder, "junction")) {
+		return "skipped, no permission to create a junction or symlink";
+	}
+
+	assert.throws(() => st.read("secret.txt"), /isn't available/);
+	assert.throws(() => st.write("secret.txt", "overwritten", "t"), /isn't available/);
+	assert.throws(() => st.write("new.txt", "x", "t"), /isn't available/);
+	assert.throws(() => st.edit("secret.txt", "outside", "x", "t"), /isn't available/);
+	assert.throws(() => st.delete("secret.txt"), /isn't available/);
+	assert.throws(() => st.files(), /isn't available/);
+	assert.strictEqual(run_file_tool(st, tool("list_files", {}), "t").is_error, true);
+	assert.strictEqual(fs.readFileSync(path.join(outside, "secret.txt"), "utf8"), "outside", "the outside file is untouched");
+	assert(!fs.existsSync(path.join(outside, "new.txt")), "nothing was created outside");
+	assert(!fs.existsSync(path.join(outside, ".meta.json")), "not even metadata");
+
+	// Putting the real folder back makes it usable again.
+
+	try {
+		fs.unlinkSync(st.folder);
+	} catch (error) {
+		fs.rmdirSync(st.folder);					// Windows removes a junction this way.
+	}
+	fs.renameSync(path.join(root, "Opus-moved"), st.folder);
+	assert.strictEqual(st.read("mine.txt").text, "hello");
 });
 
 test("storage: write, read, edit, delete, metadata and limits", () => {
