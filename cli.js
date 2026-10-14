@@ -16,7 +16,7 @@ const {new_backend} = require("./src/backend");
 const {new_room} = require("./src/room");
 const {attach_transcript} = require("./src/transcript");
 
-const COLORS = [36, 33, 35, 32, 34, 31];		// ANSI: cyan, yellow, magenta, green, blue, red.
+const COLORS = [36, 33, 32, 34, 31, 35];		// ANSI: cyan, yellow, green, blue, red, magenta.
 const USE_COLOR = process.stdout.isTTY;
 
 const HELP = `Type a message and press Enter to say it to the room. @Name gives that model the floor next.
