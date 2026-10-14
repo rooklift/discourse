@@ -10,7 +10,13 @@ The models are told the truth about where they are: who set the room up and why,
 * `npm install`
 * Put your API key, alone, in a file **outside this repo**, e.g. `~/.secrets/anthropic_api_key.txt`.
 * Copy `config.json.example` to `config.json` and set `api_key_file` to that path. The config only holds the key's location, so committing it wouldn't leak the key (it's gitignored anyway).
-* `node cli.js` (or `node cli.js path/to/other_config.json`)
+* `node cli.js`
+
+Options:
+
+* `node cli.js Hello everyone, @Haiku first?` starts the room with that as your opening message (overriding `opening_message` in the config). Quotes are optional, but your shell may want them around characters like `?`, `!` or `'`.
+* `--config path/to/other_config.json` (or `-c`) uses a different config.
+* `--` before a message that starts with a dash.
 
 ## How the room works
 

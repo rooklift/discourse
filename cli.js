@@ -1,6 +1,13 @@
 "use strict";
 
-// Terminal front end. Usage: node cli.js [path/to/config.json]
+// Terminal front end.
+//
+// Usage: node cli.js [--config path/to/config.json] [opening message...]
+//
+// Any words after the options become the host's opening message, overriding opening_message
+// in the config. Use -- before a message that itself starts with a dash.
+
+const USAGE = "Usage: node cli.js [--config path/to/config.json] [opening message...]";
 
 const path = require("path");
 const readline = require("readline");
@@ -50,18 +57,56 @@ function money(n) {
 	return "$" + n.toFixed(4);
 }
 
+function parse_args(argv) {
+
+	let opts = {config: path.join(__dirname, "config.json"), message: ""};
+	let words = [];
+
+	for (let i = 0; i < argv.length; i++) {
+		let arg = argv[i];
+		if (arg === "--") {
+			words.push(...argv.slice(i + 1));
+			break;
+		} else if (arg === "--config" || arg === "-c") {
+			if (i + 1 >= argv.length) {
+				throw new Error(`${arg} needs a path`);
+			}
+			opts.config = argv[++i];
+		} else if (arg === "--help" || arg === "-h") {
+			opts.help = true;
+		} else if (arg.startsWith("-") && words.length === 0) {
+			throw new Error(`Unknown option ${arg} (use -- before a message that starts with a dash)`);
+		} else {
+			words.push(arg);
+		}
+	}
+
+	opts.config = path.resolve(opts.config);
+	opts.message = words.join(" ").trim();
+	return opts;
+}
+
 function main() {
 
-	let config_path = path.resolve(process.argv[2] || path.join(__dirname, "config.json"));
+	let opts;
 	let cfg;
 	let api_key;
 
 	try {
-		cfg = load_config(config_path);
+		opts = parse_args(process.argv.slice(2));
+		if (opts.help) {
+			console.log(USAGE);
+			process.exit(0);
+		}
+		cfg = load_config(opts.config);
 		api_key = read_api_key(cfg);
 	} catch (error) {
-		console.error(`Error: ${error.message}`);
+		console.error(`Error: ${error.message}\n${USAGE}`);
 		process.exit(1);
+	}
+
+	if (opts.message) {
+		cfg.opening_message = opts.message;
 	}
 
 	let room = new_room(cfg, new_backend(api_key));
