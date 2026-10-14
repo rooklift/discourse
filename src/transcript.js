@@ -61,6 +61,10 @@ function markdown_for(entry, cfg) {
 		return `**${cfg.host_name}** (host)\n\n${entry.text}\n\n`;
 	}
 
+	if (entry.kind === "file_op") {
+		return `> *${entry.author} ${entry.summary}.*\n\n`;
+	}
+
 	if (entry.kind === "error") {
 		return `> *Error${entry.author ? ` (${entry.author})` : ""}: ${entry.text}*\n\n`;
 	}
@@ -73,10 +77,6 @@ function markdown_for(entry, cfg) {
 
 	for (let t of entry.thinking) {
 		s += `<details><summary>${entry.author} thinking</summary>\n\n${t}\n\n</details>\n\n`;
-	}
-
-	for (let op of entry.file_ops || []) {
-		s += `> *${entry.author} ${op.summary}.*\n\n`;
 	}
 
 	if (entry.limit_note) {

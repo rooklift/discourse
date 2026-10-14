@@ -9,6 +9,7 @@
 // case-insensitive. Metadata (which model version wrote each file) lives in a hidden file the
 // tools can't name.
 
+const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 
@@ -46,6 +47,7 @@ function new_storage(root_dir, name) {
 	let storage = Object.create(storage_prototype);
 	storage.folder = folder;
 	storage.real = fs.realpathSync(folder);		// Where the folder really is; rechecked on every use.
+	remove_stale_temps(folder);
 	return storage;
 }
 
@@ -300,11 +302,17 @@ function usable(st) {
 // moment of opening where the platform supports it (not Windows, where the checks still apply).
 // New files are created exclusively, which never follows an existing link.
 //
+// Writes never put existing data at risk: a replacement is written in full to a temporary
+// file beside the original, synced to disk, and only then renamed over it, so a full disk or
+// any other failure leaves the original as it was. Renaming replaces the directory entry
+// itself, so it can't write through a link either.
+//
 // What this can't stop: Node has no way to open a file relative to a held folder handle, so a
 // local process racing to swap the folder itself between our check and the open could still
 // redirect one operation. Against a hostile local user, use file permissions.
 
 const NOFOLLOW = fs.constants.O_NOFOLLOW || 0;
+const TEMP_PREFIX = ".tmp-";					// Hidden, so the tools can never name or list them.
 
 function open_checked(full, flags) {
 	let fd = fs.openSync(full, flags | NOFOLLOW);
@@ -328,15 +336,22 @@ function read_text(full) {
 	}
 }
 
-function replace_text(full, text) {
-	let fd = open_checked(full, fs.constants.O_WRONLY);		// No O_TRUNC: check first, then truncate.
-	try {
-		fs.ftruncateSync(fd, 0);
-		fs.writeSync(fd, text, 0, "utf8");
-	} finally {
-		fs.closeSync(fd);
+// writeSync may write fewer bytes than asked; keep going until all of them are written.
+
+function write_all(fd, text) {
+	let buf = Buffer.from(text, "utf8");
+	let done = 0;
+	while (done < buf.length) {
+		let n = fs.writeSync(fd, buf, done, buf.length - done, done);
+		if (!(n > 0)) {
+			throw new Error("The disk accepted no more data.");
+		}
+		done += n;
 	}
 }
+
+// Creates a new file exclusively, writes it in full and syncs it. If anything fails, the
+// partly written file is removed.
 
 function create_text(full, text) {
 	let fd;
@@ -349,9 +364,56 @@ function create_text(full, text) {
 		throw error;
 	}
 	try {
-		fs.writeSync(fd, text, 0, "utf8");
-	} finally {
+		write_all(fd, text);
+		fs.fsyncSync(fd);
+	} catch (error) {
+		close_quietly(fd);
+		unlink_quietly(full);
+		throw error;
+	}
+	fs.closeSync(fd);
+}
+
+// Replaces an existing file's content without ever leaving it truncated or half written.
+
+function replace_text(full, text) {
+	close_quietly(open_checked(full, fs.constants.O_RDONLY));		// It must still be a plain file.
+	let temp = path.join(path.dirname(full), TEMP_PREFIX + crypto.randomBytes(8).toString("hex"));
+	create_text(temp, text);
+	try {
+		fs.renameSync(temp, full);
+	} catch (error) {
+		unlink_quietly(temp);
+		throw error;
+	}
+}
+
+function close_quietly(fd) {
+	try {
 		fs.closeSync(fd);
+	} catch (error) {
+		// Nothing more to do.
+	}
+}
+
+function unlink_quietly(full) {
+	try {
+		fs.unlinkSync(full);
+	} catch (error) {
+		// Nothing more to do.
+	}
+}
+
+// Temporary files left by a crash mid-write are cleared when the folder is opened.
+
+function remove_stale_temps(folder) {
+	for (let name of fs.readdirSync(folder)) {
+		if (name.startsWith(TEMP_PREFIX)) {
+			let full = path.join(folder, name);
+			if (fs.lstatSync(full).isFile()) {
+				unlink_quietly(full);
+			}
+		}
 	}
 }
 

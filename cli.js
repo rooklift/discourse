@@ -140,14 +140,13 @@ function main() {
 			print(dim(`-- ${entry.text}`));
 		} else if (entry.kind === "host") {
 			print(`${paint(cfg.host_name, 1)}: ${entry.text}`);
+		} else if (entry.kind === "file_op") {
+			print(paint(`(${entry.author} ${entry.summary})`, entry.is_error ? 31 : 2));
 		} else if (entry.kind === "error") {
 			print(paint(`Error${entry.author ? ` (${entry.author})` : ""}: ${entry.text}`, 31));
 		} else if (entry.kind === "turn") {
 			for (let t of entry.thinking) {
 				print(dim(`[${entry.author} thinking] ${t}`));
-			}
-			for (let op of entry.file_ops || []) {
-				print(paint(`(${entry.author} ${op.summary})`, op.is_error ? 31 : 2));
 			}
 			if (entry.limit_note) {
 				print(dim(`(${entry.author}'s turn ${entry.limit_note})`));

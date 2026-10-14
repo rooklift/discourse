@@ -575,6 +575,11 @@ const room_prototype = {
 					r = {content: "Error: the file tool failed unexpectedly.", is_error: true, summary: `tool ${t.name} failed unexpectedly`};
 				}
 				step.file_ops.push({tool: t.name, summary: r.summary, is_error: r.is_error});
+
+				// Logged now, not at the end of the turn, so the transcript has it even if the
+				// session dies during a later step.
+
+				this.append({kind: "file_op", author: p.name, tool: t.name, summary: r.summary, is_error: r.is_error});
 				step.tool_results.push({tool_use_id: t.id, content: r.content, is_error: r.is_error});
 			} else {
 				step.tool_results.push({tool_use_id: t.id, content: `Unknown tool: ${t.name}`, is_error: true});

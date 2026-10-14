@@ -658,6 +658,111 @@ test("a reply that arrives after /quit isn't acted on", async () => {
 	assert.strictEqual(turns(room).length, 0);
 });
 
+// Temporarily replaces fs.writeSync, to simulate short writes or a full disk.
+
+function with_write_sync(fake, fn) {
+	let real = fs.writeSync;
+	fs.writeSync = (...args) => fake(real, ...args);
+	try {
+		return fn();
+	} finally {
+		fs.writeSync = real;
+	}
+}
+
+function leftovers(st) {
+	return fs.readdirSync(st.folder).filter(n => n.startsWith(".tmp-"));
+}
+
+test("storage: short writes are completed, not silently truncated", () => {
+	let st = new_storage(temp_dir(), "Opus");
+	let two_at_a_time = (real, fd, data, ...rest) => {				// Handles both writeSync signatures.
+		if (typeof data === "string") {
+			return real(fd, data.slice(0, 2), rest[0], rest[1]);
+		}
+		let [off, len, pos] = rest;
+		return real(fd, data, off, Math.min(len, 2), pos);
+	};
+	let r = with_write_sync(two_at_a_time, () => run_file_tool(st, tool("write_file", {filename: "a.md", content: "replaced content!"}), "t"));
+	assert.strictEqual(r.content, "Created a.md (17 bytes).");
+	assert.strictEqual(st.read("a.md").text, "replaced content!");
+	with_write_sync(two_at_a_time, () => st.write("a.md", "and again, in full", "t"));
+	assert.strictEqual(st.read("a.md").text, "and again, in full");
+	with_write_sync(two_at_a_time, () => st.edit("a.md", "again", "once more", "t"));
+	assert.strictEqual(st.read("a.md").text, "and once more, in full");
+	assert.deepStrictEqual(leftovers(st), []);
+});
+
+test("storage: a full disk never damages the original file", () => {
+	let st = new_storage(temp_dir(), "Opus");
+	st.write("keep.md", "precious words", "t");
+	let disk_full = () => {
+		let e = new Error("ENOSPC: no space left on device");
+		e.code = "ENOSPC";
+		throw e;
+	};
+	let accepts_nothing = () => 0;
+
+	for (let fake of [disk_full, accepts_nothing]) {
+		let r = with_write_sync(fake, () => run_file_tool(st, tool("edit_file", {filename: "keep.md", old_text: "precious", new_text: "lost"}), "t"));
+		assert.strictEqual(r.is_error, true);
+		assert.strictEqual(st.read("keep.md").text, "precious words", "edit failure left the original intact");
+
+		r = with_write_sync(fake, () => run_file_tool(st, tool("write_file", {filename: "keep.md", content: "overwritten"}), "t"));
+		assert.strictEqual(r.is_error, true);
+		assert.strictEqual(st.read("keep.md").text, "precious words", "rewrite failure left the original intact");
+
+		r = with_write_sync(fake, () => run_file_tool(st, tool("write_file", {filename: "new.md", content: "half"}), "t"));
+		assert.strictEqual(r.is_error, true);
+		assert(!st.exists("new.md"), "a failed new file isn't left half written");
+
+		assert.deepStrictEqual(leftovers(st), [], "no temporary files left behind");
+	}
+	assert.deepStrictEqual(st.files().map(f => f.name), ["keep.md"]);
+});
+
+test("storage: temporary files left by a crash are cleared, and never listed", () => {
+	let root = temp_dir();
+	let st = new_storage(root, "Opus");
+	fs.writeFileSync(path.join(st.folder, ".tmp-0123456789abcdef"), "debris");
+	assert.deepStrictEqual(st.files(), [], "not listed");
+	assert.throws(() => st.read(".tmp-0123456789abcdef"), /Invalid filename/, "not nameable");
+	new_storage(root, "Opus");
+	assert.deepStrictEqual(leftovers(st), [], "cleared when the folder is next opened");
+});
+
+test("file operations reach the log and transcript as each step completes", async () => {
+	let root = temp_dir();
+	let cfg = make_cfg({storage_dir: root, max_turns: 2, farewell_round: false, transcript_dir: temp_dir()});
+	let room;
+	let files;
+	let seen_mid_turn = null;
+	let backend = fake_backend((name, req, n) => {
+		if (name === "Opus" && n === 0) return file_step(tool("write_file", {filename: "notes.md", content: "early"}));
+		return speak("Done.");
+	}, {
+		before_reply: async (name, req, n) => {
+			if (name === "Opus" && n === 1) {				// During the second API call of the turn.
+				seen_mid_turn = {
+					log: room.log.some(e => e.kind === "file_op" && e.summary === "created notes.md (5 bytes)"),
+					md: fs.readFileSync(files.md_path, "utf8").includes("Opus created notes.md (5 bytes)"),
+					jsonl: fs.readFileSync(files.jsonl_path, "utf8").includes("\"kind\":\"file_op\""),
+				};
+			}
+		},
+	});
+	room = new_room(cfg, backend, {template: "x", random: () => 0});
+	files = require("../src/transcript").attach_transcript(room, cfg);
+	await room.run();
+	assert.deepStrictEqual(seen_mid_turn, {log: true, md: true, jsonl: true});
+	let md = fs.readFileSync(files.md_path, "utf8");
+	assert.strictEqual(md.split("created notes.md").length - 1, 1, "recorded once, not again at the end of the turn");
+	let sonnet = backend.calls.find(c => c.name === "Sonnet");
+	assert(sonnet, "Sonnet had a turn after Opus");
+	assert(last_user_text(sonnet.req).includes("Done."), "Sonnet sees Opus's message");
+	assert(!last_user_text(sonnet.req).includes("notes.md"), "but not the file_op entry");
+});
+
 test("storage: a folder replaced by a link after startup is refused", () => {
 	let root = temp_dir();
 	let st = new_storage(root, "Opus");
