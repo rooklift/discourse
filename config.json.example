@@ -4,6 +4,8 @@
 	"host_present": true,
 	"system_prompt": "./system/standard.txt",
 	"transcript_dir": "./transcripts",
+	"storage_dir": "./storage",
+	"word_list": "./words.txt",
 	"show_thinking": false,
 	"opening_message": "",
 	"first_speaker": "",
