@@ -14,6 +14,7 @@
 const EventEmitter = require("events");
 const pricing = require("./pricing");
 const {build_system_prompt} = require("./prompt");
+const {new_storage, FILE_TOOLS, FILE_TOOL_NAMES, run_file_tool, LIMITS} = require("./storage");
 
 const TOOLS = [
 	{
@@ -46,6 +47,7 @@ const CLOSING_PHRASES = {
 };
 
 const MAX_CONSECUTIVE_ERRORS = 3;
+const MAX_TOOL_STEPS = 10;					// API calls per turn, when a model uses its file tools.
 
 // ------------------------------------------------------------------------------------------------
 
@@ -59,16 +61,22 @@ function new_room(cfg, backend, opts = {}) {
 		backend: backend,
 		random: opts.random || Math.random,		// Injectable for tests.
 
-		participants: cfg.participants.map(p => ({
-			name: p.name,
-			cfg: p,
-			system: build_system_prompt(cfg, p, opts.template ?? null),
-			present: true,
-			last_spoke: -1,						// Value of message_count when this model last spoke.
-			turns: 0,
-			cost: 0,
-			usage: {input: 0, cache_read: 0, cache_write: 0, output: 0},
-		})),
+		participants: cfg.participants.map(p => {
+			let storage = cfg.storage_dir ? new_storage(cfg.storage_dir, p.name) : null;
+			let storage_info = storage ? {listing: storage.listing(), limits: LIMITS} : null;
+			return {
+				name: p.name,
+				cfg: p,
+				storage: storage,					// Private folder, or null if storage is off.
+				tools: storage ? TOOLS.concat(FILE_TOOLS) : TOOLS,
+				system: build_system_prompt(cfg, p, opts.template ?? null, storage_info),
+				present: true,
+				last_spoke: -1,						// Value of message_count when this model last spoke.
+				turns: 0,
+				cost: 0,
+				usage: {input: 0, cache_read: 0, cache_write: 0, output: 0},
+			};
+		}),
 
 		log: [],								// Everything that happened, in order. The single source of truth.
 
@@ -330,7 +338,7 @@ const room_prototype = {
 		let tool_results = [];
 
 		let flush = () => {
-			let content = tool_results.map(tr => ({type: "tool_result", tool_use_id: tr.tool_use_id, content: tr.content}));
+			let content = tool_results.map(tool_result_block);
 			if (parts.length > 0) {
 				content.push({type: "text", text: parts.join("\n\n")});
 			}
@@ -343,12 +351,19 @@ const room_prototype = {
 
 		for (let entry of this.log) {
 			if (entry.kind === "turn" && entry.author === me.name) {
-				if (entry.blocks.length === 0) {
-					continue;
+
+				// A turn is one or more API calls ("steps"). Each step becomes an assistant message,
+				// and its tool results open the following user message: on their own between
+				// steps, or ahead of everyone else's news after the last step.
+
+				for (let step of entry.steps) {
+					if (step.blocks.length === 0) {
+						continue;
+					}
+					flush();
+					messages.push({role: "assistant", content: step.blocks});
+					tool_results = step.tool_results.slice();
 				}
-				flush();
-				messages.push({role: "assistant", content: entry.blocks});
-				tool_results = entry.tool_results.slice();
 			} else {
 				let s = this.render_for(entry, me);
 				if (s) {
@@ -379,56 +394,94 @@ const room_prototype = {
 		this.emit("turn_start", {name: p.name});
 		this.emit_state();
 
-		let response;
+		// A turn is a short loop: while the model is using its file tools, run them and call
+		// again, so it can read or write before it speaks. Anything else ends the turn.
 
-		try {
-			response = await this.backend.send({
-				participant: p.cfg,
-				system: p.system,
-				messages: messages,
-				tools: TOOLS,
-				show_thinking: this.cfg.show_thinking,
-				cache_ttl: this.cfg.cache_ttl,
-				signal: this.abort_controller.signal,
-				on_text: (delta) => this.emit("text_delta", {name: p.name, delta}),
-			});
-		} catch (error) {
-			this.in_flight = null;
-			this.abort_controller = null;
-			if (this.closed || (this.backend.is_abort_error && this.backend.is_abort_error(error))) {
-				this.emit_state();
-				return;
-			}
-			this.consecutive_errors++;
-			this.passed.add(p.name);			// So the floor moves on.
-			this.append({kind: "error", author: p.name, text: String(error?.message || error)});
-			if (this.consecutive_errors >= MAX_CONSECUTIVE_ERRORS) {
-				if (this.cfg.host_present) {
-					this.paused = true;
-					this.append({kind: "error", author: null, text: `Paused after ${this.consecutive_errors} errors in a row. /resume to carry on.`});
-				} else {
-					this.close_request = {reason: "errors", farewell: false};
+		let steps = [];
+		let conversation = messages.slice();
+		let failure = null;
+
+		while (true) {
+
+			let response;
+
+			try {
+				response = await this.backend.send({
+					participant: p.cfg,
+					system: p.system,
+					messages: conversation,
+					tools: p.tools,
+					show_thinking: this.cfg.show_thinking,
+					cache_ttl: this.cfg.cache_ttl,
+					signal: this.abort_controller.signal,
+					on_text: (delta) => this.emit("text_delta", {name: p.name, delta}),
+				});
+			} catch (error) {
+				if (this.closed || (this.backend.is_abort_error && this.backend.is_abort_error(error))) {
+					this.in_flight = null;
+					this.abort_controller = null;
+					this.emit_state();
+					return;
 				}
+				failure = error;
+				break;
 			}
-			this.emit_state();
-			return;
+
+			let turn_text = steps.map(s => s.text).concat(response_text(response)).join("");
+			let step = this.make_step(p, response, turn_text);
+			steps.push(step);
+
+			if (step.ends_turn || this.closed) {
+				break;
+			}
+			if (steps.length >= MAX_TOOL_STEPS) {
+				step.limit_note = `stopped after ${MAX_TOOL_STEPS} steps`;
+				break;
+			}
+			if (this.cfg.budget > 0 && this.total_cost >= this.cfg.budget) {
+				step.limit_note = "stopped: budget spent";
+				break;
+			}
+
+			conversation.push({role: "assistant", content: step.blocks});
+			conversation.push({role: "user", content: step.tool_results.map(tool_result_block)});
 		}
 
 		this.in_flight = null;
 		this.abort_controller = null;
-		this.consecutive_errors = 0;
 
-		this.record_response(p, response);
+		if (steps.length > 0) {
+			this.consecutive_errors = 0;
+			this.record_turn(p, steps);
+		}
+
+		if (failure) {
+			this.on_error(p, failure, steps.length > 0);
+		}
+
 		this.emit_state();
 	},
 
-	record_response: function(p, response) {
+	on_error: function(p, error, partial) {
+		if (!partial) {
+			this.consecutive_errors++;
+			this.passed.add(p.name);			// So the floor moves on.
+		}
+		this.append({kind: "error", author: p.name, text: String(error?.message || error)});
+		if (this.consecutive_errors >= MAX_CONSECUTIVE_ERRORS) {
+			if (this.cfg.host_present) {
+				this.paused = true;
+				this.append({kind: "error", author: null, text: `Paused after ${this.consecutive_errors} errors in a row. /resume to carry on.`});
+			} else {
+				this.close_request = {reason: "errors", farewell: false};
+			}
+		}
+	},
 
-		let usage = response.usage || {};
+	// Usage and cost for one API call.
+
+	account: function(p, usage) {
 		let cost = pricing.cost_of_usage(p.cfg.price_tiers, usage, this.cfg.cache_ttl);
-
-		p.turns++;
-		this.turn_count++;
 		p.usage.input += usage.input_tokens || 0;
 		p.usage.cache_read += usage.cache_read_input_tokens || 0;
 		p.usage.cache_write += usage.cache_creation_input_tokens || 0;
@@ -439,54 +492,97 @@ const room_prototype = {
 			p.cost += cost;
 			this.total_cost += cost;
 		}
+		return cost;
+	},
+
+	// Turns one API response into a step: the blocks to replay, the tool results to send back
+	// (running any file tools now), and whether the turn is over.
+
+	make_step: function(p, response, turn_text) {
+
+		let usage = response.usage || {};
+		let cost = this.account(p, usage);
 
 		let content = Array.isArray(response.content) ? response.content : [];
-		let text = content.filter(b => b.type === "text").map(b => b.text).join("\n\n").trim();
-		let thinking = content.filter(b => b.type === "thinking" && b.thinking).map(b => b.thinking);
-		let tool_uses = content.filter(b => b.type === "tool_use");
-		let note = "";
+		let text = response_text(response);
+		let step = {
+			text: text,
+			thinking: content.filter(b => b.type === "thinking" && b.thinking).map(b => b.thinking),
+			stop_reason: response.stop_reason || "",
+			blocks: [],
+			tool_results: [],
+			file_ops: [],
+			pass: false,
+			leave: null,
+			usage: usage,
+			cost: cost,
+			ends_turn: true,
+		};
 
-		let blocks = [];
-		let tool_results = [];
-		let action;
-
-		if (response.stop_reason === "max_tokens" || response.stop_reason === "refusal") {
+		if (step.stop_reason === "max_tokens" || step.stop_reason === "refusal") {
 
 			// A cut-off reply may hold a half-written tool call. Keep only the text, which is
-			// allowed (earlier thinking may be dropped when no tool call is pending).
+			// allowed (thinking may be dropped when no tool call is pending).
 
-			blocks = text ? [{type: "text", text}] : [];
-			action = text ? "speak" : "silent";
+			step.blocks = text.trim() ? [{type: "text", text: text.trim()}] : [];
+			return step;
+		}
 
-		} else {
+		let tool_uses = content.filter(b => b.type === "tool_use");
 
-			let leave = tool_uses.find(t => t.name === "leave_room");
-			let pass = tool_uses.some(t => t.name === "pass");
+		if (text.trim() || tool_uses.length > 0) {
+			step.blocks = content.map(clean_block).filter(b => b !== null);
+		}
 
-			action = leave ? "leave" : (text ? "speak" : (pass ? "pass" : "silent"));
-			note = typeof leave?.input?.note_to_host === "string" ? leave.input.note_to_host.trim() : "";
+		let author = `${p.cfg.full_name} (${p.cfg.model})`;
+		let used_files = false;
 
-			if (text || tool_uses.length > 0) {
-				blocks = content.map(clean_block).filter(b => b !== null);
-			}
-
-			for (let t of tool_uses) {
-				tool_results.push({tool_use_id: t.id, content: tool_result_text(t.name, text)});
+		for (let t of tool_uses) {
+			if (t.name === "pass") {
+				step.pass = true;
+				step.tool_results.push({tool_use_id: t.id, content: turn_text.trim() ? "Your message was posted." : "You passed."});
+			} else if (t.name === "leave_room") {
+				step.leave = t;
+				step.tool_results.push({tool_use_id: t.id, content: "You have left the room."});
+			} else if (FILE_TOOL_NAMES.includes(t.name) && p.storage) {
+				used_files = true;
+				let r = run_file_tool(p.storage, t, author);
+				step.file_ops.push({tool: t.name, summary: r.summary, is_error: r.is_error});
+				step.tool_results.push({tool_use_id: t.id, content: r.content, is_error: r.is_error});
+			} else {
+				step.tool_results.push({tool_use_id: t.id, content: `Unknown tool: ${t.name}`, is_error: true});
 			}
 		}
+
+		step.ends_turn = !(used_files && step.stop_reason === "tool_use" && !step.pass && !step.leave);
+		return step;
+	},
+
+	record_turn: function(p, steps) {
+
+		p.turns++;
+		this.turn_count++;
+
+		let text = steps.map(s => s.text.trim()).filter(Boolean).join("\n\n");
+		let leave = steps.map(s => s.leave).find(Boolean) || null;
+		let pass = steps.some(s => s.pass);
+		let action = leave ? "leave" : (text ? "speak" : (pass ? "pass" : "silent"));
+		let note = typeof leave?.input?.note_to_host === "string" ? leave.input.note_to_host.trim() : "";
+		let costs = steps.map(s => s.cost);
+		let last = steps[steps.length - 1];
 
 		this.append({
 			kind: "turn",
 			author: p.name,
 			action: action,
 			text: text,
-			thinking: thinking,
+			thinking: steps.flatMap(s => s.thinking),
+			file_ops: steps.flatMap(s => s.file_ops),
 			note_to_host: note,
-			stop_reason: response.stop_reason || "",
-			blocks: blocks,
-			tool_results: tool_results,
-			usage: usage,
-			cost: cost,
+			stop_reason: last.stop_reason,
+			limit_note: last.limit_note || "",
+			steps: steps.map(s => ({blocks: s.blocks, tool_results: s.tool_results, usage: s.usage})),
+			cost: costs.includes(null) ? null : costs.reduce((a, b) => a + b, 0),
 			closing: this.closing,
 		});
 
@@ -640,14 +736,17 @@ function clean_block(b) {
 	return b;									// thinking / redacted_thinking: must be passed back unchanged.
 }
 
-function tool_result_text(name, text) {
-	if (name === "pass") {
-		return text ? "Your message was posted." : "You passed.";
+function response_text(response) {
+	let content = Array.isArray(response.content) ? response.content : [];
+	return content.filter(b => b.type === "text").map(b => b.text).join("\n\n");
+}
+
+function tool_result_block(tr) {
+	let block = {type: "tool_result", tool_use_id: tr.tool_use_id, content: tr.content};
+	if (tr.is_error) {
+		block.is_error = true;
 	}
-	if (name === "leave_room") {
-		return "You have left the room.";
-	}
-	return `Unknown tool: ${name}`;
+	return block;
 }
 
 module.exports = {new_room, TOOLS};

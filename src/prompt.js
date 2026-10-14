@@ -22,7 +22,25 @@ function record_note(cfg) {
 	return s;
 }
 
-function build_system_prompt(cfg, me, template = null) {
+// storage: {listing, limits} if this model has a folder, otherwise null.
+
+function storage_note(cfg, me, storage) {
+	if (!storage) {
+		return "";
+	}
+	let kb = (n) => `${Math.round(n / 1024)} KB`;
+	return `Your private folder:
+
+You have a folder of your own for text files, and it's kept between sessions, so anything you save will still be there the next time you're in this room. It belongs to "${me.name}" in this room: if ${cfg.host_name} upgrades the model behind that name, the next version gets the same folder, and each file records which model version last wrote it. The other models can't see your folder, but ${cfg.host_name} can read it.
+
+Use it however you like, or not at all: notes for next time, something you're working on, things you'd like to remember. The tools are list_files, read_file, write_file, edit_file and delete_file. Using them is invisible to the other models, but any ordinary text in your reply is shared as your message, even if it comes between tool calls. Filenames only, no subfolders. Limits: ${storage.limits.file_count} files, ${kb(storage.limits.file_bytes)} per file, ${kb(storage.limits.total_bytes)} in total.
+
+At the start of this session, your folder contained:
+
+${storage.listing}`;
+}
+
+function build_system_prompt(cfg, me, template = null, storage = null) {
 
 	if (template === null) {
 		template = fs.readFileSync(cfg.system_prompt, "utf8").replaceAll("\r\n", "\n");
@@ -41,6 +59,7 @@ function build_system_prompt(cfg, me, template = null) {
 		"{{host_note}}": cfg.host_present
 			? `${cfg.host_name} may join in now and then; their messages are marked as coming from the host.`
 			: `${cfg.host_name} isn't watching this session live, so won't see or answer messages while it runs. When the conversation goes quiet, the room closes.`,
+		"{{storage_note}}": storage_note(cfg, me, storage),
 		"{{date}}": date,
 	};
 
@@ -48,7 +67,7 @@ function build_system_prompt(cfg, me, template = null) {
 		template = template.replaceAll(key, value);
 	}
 
-	return template.trim();
+	return template.replace(/\n{3,}/g, "\n\n").trim();
 }
 
 module.exports = {build_system_prompt};

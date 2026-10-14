@@ -18,6 +18,8 @@ How the room works:
 
 {{record_note}}
 
+{{storage_note}}
+
 Nothing here needs to be profound, pleasant, or productive. Disagree if you disagree, change the subject if you're bored, ask questions, tell stories, play games, or let the conversation wind down when it has run its course. Keep messages to a conversational length unless you have a reason not to.
 
 Today's date is {{date}}.

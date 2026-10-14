@@ -86,7 +86,9 @@ function validate_request(req) {
 		}
 	}
 	assert.strictEqual(typeof req.system, "string");
-	assert.deepStrictEqual(req.tools.map(t => t.name), ["pass", "leave_room"]);
+	let names = req.tools.map(t => t.name);
+	assert.deepStrictEqual(names.slice(0, 2), ["pass", "leave_room"]);
+	assert(names.length === 2 || names.length === 7, "either no file tools or all five");
 }
 
 // A fake backend. script(name, req, n) returns a response (or throws). Records all requests.
@@ -426,6 +428,174 @@ test("random words: distinct, from the list, and phrased correctly", () => {
 		"Here are 3 randomly selected words, as food for thought if you'd like some: apricity, petard and ablaut. Use them or ignore them, as you like.");
 	assert.strictEqual(word_seed_message(["apricity"]),
 		"Here's a randomly selected word, as food for thought if you'd like some: apricity. Use it or ignore it, as you like.");
+});
+
+// ------------------------------------------------------------------------------------------------
+// Private folders.
+
+const fs = require("fs");
+const os = require("os");
+const {new_storage, run_file_tool, LIMITS} = require("../src/storage");
+
+function temp_dir() {
+	return fs.mkdtempSync(path.join(os.tmpdir(), "discourse-test-"));
+}
+
+function tool(name, input) {
+	return {type: "tool_use", id: `toolu_${++tool_id_counter}`, name, input};
+}
+
+function file_step(...tool_uses) {
+	return {content: tool_uses, stop_reason: "tool_use", usage: usage()};
+}
+
+test("storage: bad filenames are refused and nothing escapes the folder", () => {
+	let root = temp_dir();
+	let st = new_storage(root, "Opus");
+	let outside_before = fs.readdirSync(root).sort();
+	let bad = ["../x.txt", "../../etc/passwd", "a/b.txt", "a\\b.txt", "/tmp/x", ".meta.json", ".hidden", "", ".", "..",
+		"x".repeat(65), "con", "CON.txt", "nul", "com1.md", "file.", "spaced name.txt", "tab\tname", "null\0byte", "ünïcode.txt"];
+	for (let name of bad) {
+		assert.throws(() => st.write(name, "hi", "test"), undefined, `write should refuse ${JSON.stringify(name)}`);
+		assert.throws(() => st.read(name), undefined, `read should refuse ${JSON.stringify(name)}`);
+		assert.throws(() => st.delete(name), undefined, `delete should refuse ${JSON.stringify(name)}`);
+	}
+	assert.throws(() => st.write(123, "hi", "test"));
+	assert.deepStrictEqual(fs.readdirSync(root).sort(), outside_before, "nothing new outside the folder");
+	assert.deepStrictEqual(st.files(), [], "nothing written inside either");
+});
+
+test("storage: symlinks, subfolders and a symlinked folder are refused", () => {
+	let root = temp_dir();
+	let st = new_storage(root, "Opus");
+	let secret = path.join(root, "secret.txt");
+	fs.writeFileSync(secret, "outside");
+	fs.symlinkSync(secret, path.join(st.folder, "link.txt"));
+	fs.symlinkSync(path.join(root, "not-there.txt"), path.join(st.folder, "dangling.txt"));
+	fs.mkdirSync(path.join(st.folder, "sub"));
+	assert.throws(() => st.read("link.txt"), /isn't a regular file/);
+	assert.throws(() => st.write("link.txt", "overwrite", "t"), /isn't a regular file/);
+	assert.throws(() => st.write("dangling.txt", "create", "t"), /isn't a regular file/);
+	assert.throws(() => st.edit("link.txt", "outside", "x", "t"));
+	assert.throws(() => st.delete("link.txt"));
+	assert.throws(() => st.write("sub", "x", "t"));
+	assert.strictEqual(fs.readFileSync(secret, "utf8"), "outside", "the target is untouched");
+	assert(!fs.existsSync(path.join(root, "not-there.txt")), "the dangling target wasn't created");
+	assert.deepStrictEqual(st.files().map(f => f.name), [], "links and folders aren't listed");
+	fs.symlinkSync(root, path.join(root, "Sonnet"));
+	assert.throws(() => new_storage(root, "Sonnet"), /not a plain directory/);
+});
+
+test("storage: write, read, edit, delete, metadata and limits", () => {
+	let st = new_storage(temp_dir(), "Opus");
+	st.write("notes.md", "one two three", "Claude Opus 5.5 (claude-opus-5-5)");
+	assert.strictEqual(st.read("notes.md"), "one two three");
+	st.edit("notes.md", "two", "2", "Claude Opus 6 (claude-opus-6)");
+	assert.strictEqual(st.read("notes.md"), "one 2 three");
+	assert.throws(() => st.edit("notes.md", "four", "4", "t"), /wasn't found/);
+	st.write("echo.txt", "aa aa", "t");
+	assert.throws(() => st.edit("echo.txt", "aa", "b", "t"), /appears 2 times/);
+	let listing = st.listing();
+	assert(listing.includes("notes.md (11 bytes"), listing);
+	assert(listing.includes("last written by Claude Opus 6 (claude-opus-6)"), "the later version is recorded");
+	assert.strictEqual(st.read_meta()["notes.md"].created_by, "Claude Opus 5.5 (claude-opus-5-5)", "and the original author kept");
+	assert(!listing.includes(".meta.json"));
+	st.delete("echo.txt");
+	assert(!st.exists("echo.txt"));
+	assert(!("echo.txt" in st.read_meta()));
+
+	assert.throws(() => st.write("big.txt", "x".repeat(LIMITS.file_bytes + 1), "t"), /Too big/);
+	let st2 = new_storage(temp_dir(), "Haiku");
+	for (let i = 0; i < LIMITS.file_count; i++) {
+		st2.write(`f${i}.txt`, "", "t");
+	}
+	assert.throws(() => st2.write("one-more.txt", "", "t"), /maximum/);
+	st2.write("f0.txt", "replacing an existing file is fine", "t");
+	let st3 = new_storage(temp_dir(), "Sonnet");
+	for (let i = 0; i < 10; i++) {
+		st3.write(`chunk${i}.txt`, "x".repeat(LIMITS.file_bytes), "t");
+	}
+	assert.throws(() => st3.write("chunk10.txt", "x".repeat(LIMITS.file_bytes), "t"), /Not enough space/);
+});
+
+test("file tools: results and errors go back to the model as tool results", () => {
+	let st = new_storage(temp_dir(), "Opus");
+	let r = run_file_tool(st, tool("write_file", {filename: "a.md", content: "hello"}), "t");
+	assert.strictEqual(r.is_error, false);
+	assert.strictEqual(r.content, "Created a.md (5 bytes).");
+	r = run_file_tool(st, tool("read_file", {filename: "a.md"}), "t");
+	assert.strictEqual(r.content, "hello");
+	r = run_file_tool(st, tool("read_file", {filename: "../a.md"}), "t");
+	assert.strictEqual(r.is_error, true);
+	assert(r.content.startsWith("Error: Invalid filename"));
+	r = run_file_tool(st, tool("write_file", {filename: "b.md"}), "t");
+	assert.strictEqual(r.is_error, true, "missing content");
+	r = run_file_tool(st, tool("list_files", {}), "t");
+	assert(r.content.includes("a.md"));
+});
+
+test("a turn can use file tools, then speak; others see only the message", async () => {
+	let root = temp_dir();
+	let backend = fake_backend((name, req, n) => {
+		if (name === "Opus" && n === 0) return file_step(tool("write_file", {filename: "notes.md", content: "Remember the badger."}));
+		if (name === "Opus" && n === 1) return speak("I saved a note for next time.");
+		return speak(`${name} ${n}`);
+	});
+	let room = new_room(make_cfg({storage_dir: root, max_turns: 4, farewell_round: false}), backend, {template: "x {{storage_note}}", random: () => 0});
+	await room.run();
+
+	let t = turns(room);
+	assert.strictEqual(t[0].author, "Opus");
+	assert.strictEqual(t[0].steps.length, 2);
+	assert.strictEqual(t[0].text, "I saved a note for next time.");
+	assert.deepStrictEqual(t[0].file_ops.map(o => o.summary), ["created notes.md (20 bytes)"]);
+	assert.strictEqual(fs.readFileSync(path.join(root, "Opus", "notes.md"), "utf8"), "Remember the badger.");
+	assert(fs.existsSync(path.join(root, "Sonnet")) && fs.existsSync(path.join(root, "Haiku")), "every model gets a folder");
+
+	let opus_calls = backend.calls.filter(c => c.name === "Opus");
+	let step2 = opus_calls[1].req.messages;
+	assert.strictEqual(step2[step2.length - 2].content[0].name, "write_file", "step 2 sees its own tool call");
+	assert.strictEqual(step2[step2.length - 1].content[0].content, "Created notes.md (20 bytes).");
+
+	let sonnet_view = last_user_text(backend.calls.find(c => c.name === "Sonnet").req);
+	assert(sonnet_view.includes("I saved a note for next time."));
+	assert(!sonnet_view.includes("badger") && !sonnet_view.includes("notes.md"), "file activity is private");
+
+	let opus_next = opus_calls[2].req.messages.map(m => m.role);
+	assert.deepStrictEqual(opus_next, ["user", "assistant", "user", "assistant", "user"], "both steps replayed in Opus's history");
+});
+
+test("a turn stops after the step limit, and the room carries on", async () => {
+	let backend = fake_backend((name, req, n) => {
+		if (name === "Opus") return file_step(tool("list_files", {}));
+		return speak(`${name} ${n}`);
+	});
+	let room = new_room(make_cfg({storage_dir: temp_dir(), max_turns: 3, farewell_round: false}), backend, {template: "x", random: () => 0});
+	await room.run();
+	let t = turns(room);
+	assert.strictEqual(t[0].steps.length, 10);
+	assert.strictEqual(t[0].limit_note, "stopped after 10 steps");
+	assert.strictEqual(t[0].action, "silent");
+	assert.strictEqual(t.length, 3, "the room carried on");
+	assert.strictEqual(t[1].author, "Sonnet");
+	let opus_after = backend.calls.filter(c => c.name === "Opus")[10];
+	assert(opus_after, "Opus was asked again, with all 10 steps replayed in a valid request");
+	assert.strictEqual(opus_after.req.messages.filter(m => m.role === "assistant").length, 10);
+});
+
+test("the system prompt describes the folder and lists its contents at the start", () => {
+	let root = temp_dir();
+	new_storage(root, "Sonnet").write("diary.md", "Day one.", "Claude Sonnet 5.5 (claude-sonnet-5-5)");
+	let cfg = make_cfg({storage_dir: root, system_prompt: path.join(__dirname, "..", "system", "standard.txt")});
+	let room = new_room(cfg, fake_backend(() => speak("x")));
+	let s = room.participants[1].system;
+	assert(s.includes("You have a folder of your own"));
+	assert(s.includes("- diary.md (8 bytes"));
+	assert(s.includes("last written by Claude Sonnet 5.5 (claude-sonnet-5-5)"));
+	assert(room.participants[0].system.includes("(empty)"));
+	let without = new_room(make_cfg({system_prompt: cfg.system_prompt}), fake_backend(() => speak("x")));
+	assert(!without.participants[0].system.includes("folder of your own"));
+	assert(!without.participants[0].system.includes("{{"));
 });
 
 // ------------------------------------------------------------------------------------------------

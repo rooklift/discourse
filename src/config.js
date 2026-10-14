@@ -12,6 +12,7 @@ const DEFAULTS = {
 	system_prompt: "./system/standard.txt",
 	transcript_dir: "./transcripts",
 	word_list: "./words.txt",		// One word per line; used by the CLI's --random option.
+	storage_dir: "./storage",		// Each model gets a private folder in here, kept between sessions. "" turns this off.
 	show_thinking: false,			// Ask the API for thinking summaries, show them to the host and save them.
 	opening_message: "",			// Optional first message from the host.
 	first_speaker: "",				// Optional name of the participant who speaks first. Random if blank.
@@ -76,7 +77,10 @@ function load_config(config_path) {
 	// program itself, so a config kept elsewhere still finds the bundled prompt and word list.
 
 	let app_dir = path.resolve(__dirname, "..");
-	for (let key of ["api_key_file", "system_prompt", "transcript_dir", "word_list"]) {
+	for (let key of ["api_key_file", "system_prompt", "transcript_dir", "word_list", "storage_dir"]) {
+		if (key === "storage_dir" && !cfg[key]) {
+			continue;							// Empty: no storage.
+		}
 		cfg[key] = resolve_path(cfg[key], Object.hasOwn(raw, key) ? base_dir : app_dir);
 	}
 

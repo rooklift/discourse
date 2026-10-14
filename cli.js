@@ -146,6 +146,12 @@ function main() {
 			for (let t of entry.thinking) {
 				print(dim(`[${entry.author} thinking] ${t}`));
 			}
+			for (let op of entry.file_ops || []) {
+				print(paint(`(${entry.author} ${op.summary})`, op.is_error ? 31 : 2));
+			}
+			if (entry.limit_note) {
+				print(dim(`(${entry.author}'s turn ${entry.limit_note})`));
+			}
 			if (entry.text) {
 				print(`${name_tag(entry.author)}: ${entry.text}`);
 				if (entry.stop_reason === "max_tokens") {

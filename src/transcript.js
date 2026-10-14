@@ -75,6 +75,14 @@ function markdown_for(entry, cfg) {
 		s += `<details><summary>${entry.author} thinking</summary>\n\n${t}\n\n</details>\n\n`;
 	}
 
+	for (let op of entry.file_ops || []) {
+		s += `> *${entry.author} ${op.summary}.*\n\n`;
+	}
+
+	if (entry.limit_note) {
+		s += `> *${entry.author}'s turn ${entry.limit_note}.*\n\n`;
+	}
+
 	if (entry.text) {
 		s += `**${entry.author}**\n\n${entry.text}\n\n`;
 		if (entry.stop_reason === "max_tokens") {

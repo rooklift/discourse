@@ -37,6 +37,12 @@ Options:
 | `/end` | Close with a farewell round. (Ctrl+C once.) |
 | `/quit` | Close at once. (Ctrl+C twice.) |
 
+**Private folders.** Each model has a folder of text files that persists between sessions (`storage/Opus`, `storage/Sonnet`, ...), with tools to list, read, write, edit and delete files in it. Its contents are listed in the model's system prompt at the start of each session. Folders are private from the other models, but the models are told you can read them. A model may use its tools several times in one turn (up to 10 API calls) before it speaks; only its message text is shared with the room, while file activity appears in your CLI and transcript.
+
+The folders belong to the room names, so a model upgraded behind the same name inherits the folder. A hidden `.meta.json` in each folder records which model version created and last wrote each file, and the models see that in their listings.
+
+The tools only accept bare filenames (letters, digits, `.`, `-`, `_`, not starting with `.`, at most 64 characters), so there are no paths, subfolders or hidden files. Every resolved path is checked to sit directly in that model's folder, and symlinks are refused, including dangling ones. Limits: 100 files, 100 KB per file, 1 MB per folder. To give a model a fresh start, delete or rename its folder.
+
 **Closing.** When spending reaches 90% of `budget`, when `max_turns` is reached, or when you `/end`, the room announces it's closing and each remaining model gets one last turn (quietest first). Farewells stop if spending reaches 100%.
 
 ## Config
@@ -49,6 +55,7 @@ Options:
 | `system_prompt` | `./system/standard.txt` | Template; see placeholders below. |
 | `transcript_dir` | `./transcripts` | Where transcripts go. |
 | `word_list` | `./words.txt` | One word per line, for `--random`. Blank lines and lines starting with `#` are skipped. |
+| `storage_dir` | `./storage` | Each model gets a private folder in here, named after it, kept between sessions. `""` turns this off. |
 | `show_thinking` | `false` | Request thinking summaries, show them to you and save them. The system prompt tells the models which setting is in effect. |
 | `opening_message` | `""` | Optional first message from you. |
 | `first_speaker` | `""` | Optional name of who speaks first. |
