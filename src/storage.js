@@ -4,8 +4,10 @@
 //
 // The only way in is a bare filename, checked against a strict pattern: no slashes, no "..",
 // no leading dot, no subfolders. Every resolved path is checked to sit directly inside the
-// model's own folder, and symlinks and anything that isn't a regular file are refused.
-// Metadata (which model version wrote each file) lives in a hidden file the tools can't name.
+// model's own folder. Symlinks, hard-linked files and anything that isn't a plain file are
+// refused, since a link placed in a folder from outside could lead elsewhere. Names are
+// case-insensitive. Metadata (which model version wrote each file) lives in a hidden file the
+// tools can't name.
 
 const fs = require("fs");
 const path = require("path");
@@ -48,36 +50,56 @@ function new_storage(root_dir, name) {
 
 const storage_prototype = {
 
-	// Returns the full path for a filename, or throws with a message meant for the model.
+	// Checks a filename the model gave us. Throws with a message meant for the model.
 
-	resolve: function(filename) {
+	validate: function(filename) {
 		if (typeof filename !== "string" || !NAME_RE.test(filename)) {
 			throw new Error("Invalid filename. Use 1 to 64 characters: letters, digits, '.', '-' or '_', not starting with '.'. No folders.");
 		}
 		if (filename.endsWith(".") || RESERVED_RE.test(filename)) {
 			throw new Error("That filename isn't allowed. Try another.");
 		}
-		let full = path.resolve(this.folder, filename);
+		return filename;
+	},
+
+	// Filenames are case-insensitive here, as they are on Windows and macOS: "Notes.md" and
+	// "notes.md" are the same file everywhere, so quotas and metadata can't split between
+	// two spellings. Returns the spelling of the existing file if there is one.
+
+	canonical: function(filename) {
+		this.validate(filename);
+		let names = fs.readdirSync(this.folder);
+		if (names.includes(filename)) {
+			return filename;
+		}
+		let lower = filename.toLowerCase();
+		return names.find(n => n.toLowerCase() === lower) || filename;
+	},
+
+	full_path: function(name) {
+		let full = path.resolve(this.folder, name);
 		if (path.dirname(full) !== this.folder) {
 			throw new Error("Invalid filename.");
 		}
 		return full;
 	},
 
-	// Like resolve(), but also requires an existing regular file (never a symlink or folder).
+	// The canonical name and full path of an existing, plain file. Refuses symlinks (even
+	// dangling ones), folders, and files with other hard links, which could lead outside.
 
 	existing: function(filename) {
-		let full = this.resolve(filename);
+		let name = this.canonical(filename);
+		let full = this.full_path(name);
 		let st;
 		try {
 			st = fs.lstatSync(full);
 		} catch (error) {
-			throw new Error(`No file called ${filename}.`);
+			throw new Error(`No file called ${name}.`);
 		}
-		if (!st.isFile() || st.isSymbolicLink()) {
-			throw new Error(`${filename} isn't a regular file and can't be used.`);
+		if (!usable(st)) {
+			throw new Error(`${name} isn't a plain file and can't be used.`);
 		}
-		return full;
+		return {name, full};
 	},
 
 	exists: function(filename) {
@@ -91,42 +113,54 @@ const storage_prototype = {
 
 	files: function() {
 		let out = [];
-		for (let d of fs.readdirSync(this.folder, {withFileTypes: true})) {
-			if (d.isFile() && !d.isSymbolicLink() && NAME_RE.test(d.name)) {
-				let st = fs.statSync(path.join(this.folder, d.name));
-				out.push({name: d.name, size: st.size, modified: st.mtime});
+		for (let name of fs.readdirSync(this.folder)) {
+			if (!NAME_RE.test(name)) {
+				continue;
+			}
+			let st = fs.lstatSync(path.join(this.folder, name));
+			if (usable(st)) {
+				out.push({name, size: st.size, modified: st.mtime});
 			}
 		}
 		return out.sort((a, b) => a.name.localeCompare(b.name));
 	},
 
+	// Metadata is a dictionary with no prototype, so a file called __proto__ is just a key.
+
 	read_meta: function() {
+		let meta = Object.create(null);
 		try {
 			let full = path.join(this.folder, META_FILE);
-			let st = fs.lstatSync(full);
-			if (!st.isFile() || st.isSymbolicLink()) {
-				return {};
+			if (!usable(fs.lstatSync(full))) {
+				return meta;
 			}
 			let o = JSON.parse(fs.readFileSync(full, "utf8"));
-			return (o && typeof o === "object") ? o : {};
+			if (o && typeof o === "object" && !Array.isArray(o)) {
+				for (let key of Object.keys(o)) {
+					if (o[key] && typeof o[key] === "object") {
+						meta[key] = o[key];
+					}
+				}
+			}
 		} catch (error) {
-			return {};
+			// Missing or unreadable: start afresh.
 		}
+		return meta;
 	},
 
 	write_meta: function(meta) {
 		let full = path.join(this.folder, META_FILE);
-		if (lexists(full) && !fs.lstatSync(full).isFile()) {
-			return;								// Never write through a symlink.
+		if (lexists(full) && !usable(fs.lstatSync(full))) {
+			return;								// Never write through a link.
 		}
 		fs.writeFileSync(full, JSON.stringify(meta, null, "\t") + "\n");
 	},
 
-	stamp: function(filename, author) {
+	stamp: function(name, author) {
 		let meta = this.read_meta();
 		let now = new Date().toISOString();
-		let old = meta[filename] || {};
-		meta[filename] = {
+		let old = meta[name] || {};
+		meta[name] = {
 			created: old.created || now,
 			created_by: old.created_by || author,
 			modified: now,
@@ -135,9 +169,9 @@ const storage_prototype = {
 		this.write_meta(meta);
 	},
 
-	forget: function(filename) {
+	forget: function(name) {
 		let meta = this.read_meta();
-		delete meta[filename];
+		delete meta[name];
 		this.write_meta(meta);
 	},
 
@@ -151,21 +185,22 @@ const storage_prototype = {
 		let meta = this.read_meta();
 		let total = files.reduce((n, f) => n + f.size, 0);
 		let lines = files.map(f => {
-			let m = meta[f.name];
-			let when = (m?.modified || f.modified.toISOString()).slice(0, 16).replace("T", " ");
-			let by = m?.modified_by ? `, last written by ${m.modified_by}` : "";
+			let m = meta[f.name] || null;
+			let modified = typeof m?.modified === "string" ? m.modified : f.modified.toISOString();
+			let when = modified.slice(0, 16).replace("T", " ");
+			let by = typeof m?.modified_by === "string" ? `, last written by ${m.modified_by}` : "";
 			return `- ${f.name} (${f.size} bytes, ${when} UTC${by})`;
 		});
 		lines.push(`${files.length} of ${LIMITS.file_count} files, ${total} of ${LIMITS.total_bytes} bytes used.`);
 		return lines.join("\n");
 	},
 
-	check_room: function(filename, new_size) {
+	check_room: function(name, new_size) {
 		if (new_size > LIMITS.file_bytes) {
 			throw new Error(`Too big: files can be at most ${LIMITS.file_bytes} bytes (this would be ${new_size}).`);
 		}
 		let files = this.files();
-		let others = files.filter(f => f.name !== filename);
+		let others = files.filter(f => f.name.toLowerCase() !== name.toLowerCase());
 		if (others.length === files.length && files.length >= LIMITS.file_count) {
 			throw new Error(`The folder already holds the maximum of ${LIMITS.file_count} files. Delete or reuse one.`);
 		}
@@ -175,49 +210,61 @@ const storage_prototype = {
 		}
 	},
 
+	// Each of these returns the canonical name it acted on, so results can report it.
+
 	read: function(filename) {
-		return fs.readFileSync(this.existing(filename), "utf8");
+		let {name, full} = this.existing(filename);
+		return {name, text: fs.readFileSync(full, "utf8")};
 	},
 
 	write: function(filename, content, author) {
-		let full = this.resolve(filename);
-		if (lexists(full)) {
-			this.existing(filename);			// Refuses to write through a symlink (even a dangling one) or onto a folder.
+		let name = this.canonical(filename);
+		let full = this.full_path(name);
+		let existed = lexists(full);
+		if (existed) {
+			this.existing(name);				// Refuses to write through a link or onto a folder.
 		}
 		let size = Buffer.byteLength(content, "utf8");
-		this.check_room(filename, size);
+		this.check_room(name, size);
 		fs.writeFileSync(full, content, "utf8");
-		this.stamp(filename, author);
-		return size;
+		this.stamp(name, author);
+		return {name, size, existed};
 	},
 
 	edit: function(filename, old_text, new_text, author) {
-		let full = this.existing(filename);
-		let content = fs.readFileSync(full, "utf8");
+		let {name, full} = this.existing(filename);
 		if (!old_text) {
 			throw new Error("old_text can't be empty.");
 		}
-		let count = content.split(old_text).length - 1;
-		if (count === 0) {
-			throw new Error(`old_text wasn't found in ${filename}. It has to match exactly, including spaces and line breaks.`);
+		let content = fs.readFileSync(full, "utf8");
+		let first = content.indexOf(old_text);
+		if (first === -1) {
+			throw new Error(`old_text wasn't found in ${name}. It has to match exactly, including spaces and line breaks.`);
 		}
-		if (count > 1) {
-			throw new Error(`old_text appears ${count} times in ${filename}. Include more of the surrounding text so it matches once.`);
+		if (content.indexOf(old_text, first + 1) !== -1) {		// Overlapping matches count too ("aa" in "aaa").
+			throw new Error(`old_text matches more than one place in ${name}. Include more of the surrounding text so it matches once.`);
 		}
-		let i = content.indexOf(old_text);
-		let updated = content.slice(0, i) + new_text + content.slice(i + old_text.length);
+		let updated = content.slice(0, first) + new_text + content.slice(first + old_text.length);
 		let size = Buffer.byteLength(updated, "utf8");
-		this.check_room(filename, size);
+		this.check_room(name, size);
 		fs.writeFileSync(full, updated, "utf8");
-		this.stamp(filename, author);
-		return size;
+		this.stamp(name, author);
+		return {name, size};
 	},
 
 	delete: function(filename) {
-		fs.unlinkSync(this.existing(filename));
-		this.forget(filename);
+		let {name, full} = this.existing(filename);
+		fs.unlinkSync(full);
+		this.forget(name);
+		return {name};
 	},
 };
+
+// A plain file we can safely use: not a symlink or folder, and with no other hard links.
+
+function usable(st) {
+	return st.isFile() && !st.isSymbolicLink() && st.nlink === 1;
+}
 
 // ------------------------------------------------------------------------------------------------
 // Tool definitions and dispatch, used by the room.
@@ -280,41 +327,50 @@ const FILE_TOOL_NAMES = FILE_TOOLS.map(t => t.name);
 
 function run_file_tool(storage, tool_use, author) {
 
-	let input = tool_use.input || {};
-	let name = input.filename;
+	// Anything here may come straight from the model, so check types before using or even
+	// printing it: a filename could be an object whose toString throws.
+
+	let input = (tool_use.input && typeof tool_use.input === "object") ? tool_use.input : {};
+	let tool_name = typeof tool_use.name === "string" ? tool_use.name : "(unnamed tool)";
+	let shown = typeof input.filename === "string" ? JSON.stringify(input.filename.slice(0, 80)) : "";
 
 	try {
-		switch (tool_use.name) {
+		switch (tool_name) {
 		case "list_files":
 			return {content: storage.listing(), is_error: false, summary: "listed their files"};
 		case "read_file": {
-			let text = storage.read(name);
-			return {content: text.length > 0 ? text : "(the file is empty)", is_error: false, summary: `read ${name}`};
+			let r = storage.read(input.filename);
+			return {content: r.text.length > 0 ? r.text : "(the file is empty)", is_error: false, summary: `read ${r.name}`};
 		}
 		case "write_file": {
 			if (typeof input.content !== "string") {
 				throw new Error("content must be a string.");
 			}
-			let existed = storage.exists(name);
-			let size = storage.write(name, input.content, author);
-			return {content: `${existed ? "Replaced" : "Created"} ${name} (${size} bytes).`, is_error: false, summary: `${existed ? "rewrote" : "created"} ${name} (${size} bytes)`};
+			let r = storage.write(input.filename, input.content, author);
+			return {
+				content: `${r.existed ? "Replaced" : "Created"} ${r.name} (${r.size} bytes).`,
+				is_error: false,
+				summary: `${r.existed ? "rewrote" : "created"} ${r.name} (${r.size} bytes)`,
+			};
 		}
 		case "edit_file": {
 			if (typeof input.old_text !== "string" || typeof input.new_text !== "string") {
 				throw new Error("old_text and new_text must be strings.");
 			}
-			let size = storage.edit(name, input.old_text, input.new_text, author);
-			return {content: `Edited ${name} (now ${size} bytes).`, is_error: false, summary: `edited ${name}`};
+			let r = storage.edit(input.filename, input.old_text, input.new_text, author);
+			return {content: `Edited ${r.name} (now ${r.size} bytes).`, is_error: false, summary: `edited ${r.name}`};
 		}
-		case "delete_file":
-			storage.delete(name);
-			return {content: `Deleted ${name}.`, is_error: false, summary: `deleted ${name}`};
+		case "delete_file": {
+			let r = storage.delete(input.filename);
+			return {content: `Deleted ${r.name}.`, is_error: false, summary: `deleted ${r.name}`};
+		}
 		}
 	} catch (error) {
-		return {content: `Error: ${error.message}`, is_error: true, summary: `tried ${tool_use.name}${name ? ` on ${name}` : ""}, error: ${error.message}`};
+		let message = typeof error?.message === "string" ? error.message : "something went wrong.";
+		return {content: `Error: ${message}`, is_error: true, summary: `tried ${tool_name}${shown ? ` on ${shown}` : ""}, error: ${message}`};
 	}
 
-	return {content: `Unknown tool: ${tool_use.name}`, is_error: true, summary: `unknown tool ${tool_use.name}`};
+	return {content: `Unknown tool: ${tool_name}`, is_error: true, summary: `unknown tool ${tool_name}`};
 }
 
 module.exports = {new_storage, FILE_TOOLS, FILE_TOOL_NAMES, run_file_tool, LIMITS};

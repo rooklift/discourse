@@ -420,6 +420,9 @@ const room_prototype = {
 				if (this.closed || (this.backend.is_abort_error && this.backend.is_abort_error(error))) {
 					this.in_flight = null;
 					this.abort_controller = null;
+					if (steps.length > 0) {
+						this.record_turn(p, steps);		// Steps already taken (files written) stay on the record.
+					}
 					this.emit_state();
 					return;
 				}
@@ -546,7 +549,12 @@ const room_prototype = {
 				step.tool_results.push({tool_use_id: t.id, content: "You have left the room."});
 			} else if (FILE_TOOL_NAMES.includes(t.name) && p.storage) {
 				used_files = true;
-				let r = run_file_tool(p.storage, t, author);
+				let r;
+				try {
+					r = run_file_tool(p.storage, t, author);
+				} catch (error) {						// run_file_tool shouldn't throw, but a tool call must never end the session.
+					r = {content: "Error: the file tool failed unexpectedly.", is_error: true, summary: `tool ${t.name} failed unexpectedly`};
+				}
 				step.file_ops.push({tool: t.name, summary: r.summary, is_error: r.is_error});
 				step.tool_results.push({tool_use_id: t.id, content: r.content, is_error: r.is_error});
 			} else {

@@ -465,36 +465,172 @@ test("storage: bad filenames are refused and nothing escapes the folder", () => 
 	assert.deepStrictEqual(st.files(), [], "nothing written inside either");
 });
 
-test("storage: symlinks, subfolders and a symlinked folder are refused", () => {
+// Creating file symlinks needs extra privileges on Windows. Where that's refused, the symlink
+// checks are skipped (and reported), rather than failing the suite.
+
+function try_symlink(target, where, type) {
+	try {
+		fs.symlinkSync(target, where, type);
+		return true;
+	} catch (error) {
+		if (error.code === "EPERM" || error.code === "EACCES") {
+			return false;
+		}
+		throw error;
+	}
+}
+
+test("storage: symlinks, hard links, subfolders and a linked folder are refused", () => {
 	let root = temp_dir();
 	let st = new_storage(root, "Opus");
 	let secret = path.join(root, "secret.txt");
 	fs.writeFileSync(secret, "outside");
-	fs.symlinkSync(secret, path.join(st.folder, "link.txt"));
-	fs.symlinkSync(path.join(root, "not-there.txt"), path.join(st.folder, "dangling.txt"));
+	let skipped = [];
+
+	// Hard links work without privileges, on Windows (NTFS) too.
+
+	fs.linkSync(secret, path.join(st.folder, "hard.txt"));
+	assert.throws(() => st.read("hard.txt"), /isn't a plain file/);
+	assert.throws(() => st.write("hard.txt", "overwrite", "t"), /isn't a plain file/);
+	assert.throws(() => st.edit("hard.txt", "outside", "x", "t"), /isn't a plain file/);
+	assert.throws(() => st.delete("hard.txt"), /isn't a plain file/);
+
+	if (try_symlink(secret, path.join(st.folder, "link.txt"), "file")) {
+		assert.throws(() => st.read("link.txt"), /isn't a plain file/);
+		assert.throws(() => st.write("link.txt", "overwrite", "t"), /isn't a plain file/);
+		assert.throws(() => st.edit("link.txt", "outside", "x", "t"));
+		assert.throws(() => st.delete("link.txt"));
+	} else {
+		skipped.push("file symlinks");
+	}
+
+	if (try_symlink(path.join(root, "not-there.txt"), path.join(st.folder, "dangling.txt"), "file")) {
+		assert.throws(() => st.write("dangling.txt", "create", "t"), /isn't a plain file/);
+		assert(!fs.existsSync(path.join(root, "not-there.txt")), "the dangling target wasn't created");
+	} else {
+		skipped.push("dangling symlinks");
+	}
+
 	fs.mkdirSync(path.join(st.folder, "sub"));
-	assert.throws(() => st.read("link.txt"), /isn't a regular file/);
-	assert.throws(() => st.write("link.txt", "overwrite", "t"), /isn't a regular file/);
-	assert.throws(() => st.write("dangling.txt", "create", "t"), /isn't a regular file/);
-	assert.throws(() => st.edit("link.txt", "outside", "x", "t"));
-	assert.throws(() => st.delete("link.txt"));
 	assert.throws(() => st.write("sub", "x", "t"));
-	assert.strictEqual(fs.readFileSync(secret, "utf8"), "outside", "the target is untouched");
-	assert(!fs.existsSync(path.join(root, "not-there.txt")), "the dangling target wasn't created");
+	assert.strictEqual(fs.readFileSync(secret, "utf8"), "outside", "the outside file is untouched");
 	assert.deepStrictEqual(st.files().map(f => f.name), [], "links and folders aren't listed");
-	fs.symlinkSync(root, path.join(root, "Sonnet"));
-	assert.throws(() => new_storage(root, "Sonnet"), /not a plain directory/);
+
+	// "junction" makes a directory link on Windows without privileges; elsewhere it's ignored.
+
+	if (try_symlink(root, path.join(root, "Sonnet"), "junction")) {
+		assert.throws(() => new_storage(root, "Sonnet"), /not a plain directory/);
+	} else {
+		skipped.push("linked folders");
+	}
+
+	return skipped.length ? `skipped, no permission: ${skipped.join(", ")}` : "";
+});
+
+test("storage: filenames are case-insensitive, for quotas and metadata alike", () => {
+	let st = new_storage(temp_dir(), "Opus");
+	st.write("Notes.txt", "first", "Claude Opus 5.5 (claude-opus-5-5)");
+	let r = st.write("notes.txt", "second", "Claude Opus 6 (claude-opus-6)");
+	assert.strictEqual(r.name, "Notes.txt", "the existing spelling is kept");
+	assert.strictEqual(r.existed, true);
+	assert.deepStrictEqual(st.files().map(f => f.name), ["Notes.txt"], "one file, not two");
+	assert.strictEqual(st.read("NOTES.TXT").text, "second");
+	assert.deepStrictEqual(Object.keys(st.read_meta()), ["Notes.txt"], "one metadata entry");
+	assert(st.listing().includes("last written by Claude Opus 6"), "the listing shows the latest writer");
+
+	let st2 = new_storage(temp_dir(), "Haiku");
+	for (let i = 0; i < LIMITS.file_count; i++) {
+		st2.write(`F${i}.txt`, "", "t");
+	}
+	st2.write("f0.txt", "a rewrite under another spelling is not a new file", "t");
+	st2.edit("f0.TXT", "another", "a different", "t");
+	st2.delete("f1.TXT");
+	assert.strictEqual(st2.files().length, LIMITS.file_count - 1);
+});
+
+test("storage: a file called __proto__ keeps its metadata", () => {
+	let st = new_storage(temp_dir(), "Opus");
+	st.write("__proto__", "hello", "Claude Opus 5.5 (claude-opus-5-5)");
+	let meta = st.read_meta();
+	assert(Object.hasOwn(meta, "__proto__"), "stored as an ordinary key");
+	assert.strictEqual(meta["__proto__"].modified_by, "Claude Opus 5.5 (claude-opus-5-5)");
+	assert(st.listing().includes("__proto__ (5 bytes"));
+	assert(st.listing().includes("last written by Claude Opus 5.5"));
+	assert(!("modified_by" in {}), "no prototype was polluted");
+	st.delete("__proto__");
+	assert(!Object.hasOwn(st.read_meta(), "__proto__"));
+});
+
+test("storage: an edit whose old_text matches in overlapping places is refused", () => {
+	let st = new_storage(temp_dir(), "Opus");
+	st.write("a.txt", "aaa", "t");
+	assert.throws(() => st.edit("a.txt", "aa", "b", "t"), /more than one place/);
+	assert.strictEqual(st.read("a.txt").text, "aaa");
+	st.write("b.txt", "abcabc", "t");
+	assert.throws(() => st.edit("b.txt", "abc", "x", "t"), /more than one place/);
+	st.edit("b.txt", "cab", "-", "t");
+	assert.strictEqual(st.read("b.txt").text, "ab-c");
+});
+
+test("file tools: malformed input can't crash the dispatcher", () => {
+	let st = new_storage(temp_dir(), "Opus");
+	let evil = {toString: "x"};								// String(evil) throws a TypeError.
+	let inputs = [
+		{filename: evil},
+		{filename: {toString() { throw new Error("boom"); }}},
+		{filename: ["a.txt"]},
+		{filename: 42},
+		{filename: null},
+		{filename: "ok.txt", content: evil},
+		{filename: "ok.txt", old_text: evil, new_text: "x"},
+	];
+	for (let tool_name of ["read_file", "write_file", "edit_file", "delete_file"]) {
+		for (let input of inputs) {
+			let r = run_file_tool(st, {id: "t", name: tool_name, input}, "t");
+			assert.strictEqual(r.is_error, true, `${tool_name} with ${Object.keys(input)} is an error, not a crash`);
+			assert.strictEqual(typeof r.summary, "string");
+		}
+	}
+	for (let input of ["a string", 7, null, undefined, [1, 2]]) {
+		let r = run_file_tool(st, {id: "t", name: "read_file", input}, "t");
+		assert.strictEqual(r.is_error, true);
+	}
+	assert.strictEqual(run_file_tool(st, {id: "t", name: {toString: "x"}, input: {}}, "t").is_error, true);
+});
+
+test("quitting mid-turn keeps the record of steps already taken", async () => {
+	let root = temp_dir();
+	let room;
+	let backend = fake_backend((name, req, n) => {
+		if (name === "Opus" && n === 0) return file_step(tool("write_file", {filename: "notes.md", content: "kept"}));
+		return speak(`${name} ${n}`);
+	}, {
+		before_reply: async (name, req, n) => {
+			if (name === "Opus" && n === 1) {
+				room.host_quit();							// Arrives while Opus's second step is in flight.
+				let e = new Error("aborted");
+				e.name = "AbortError";
+				throw e;
+			}
+		},
+	});
+	room = new_room(make_cfg({storage_dir: root, host_present: true}), backend, {template: "x", random: () => 0});
+	await room.run();
+	assert.strictEqual(fs.readFileSync(path.join(root, "Opus", "notes.md"), "utf8"), "kept");
+	let t = turns(room);
+	assert.strictEqual(t.length, 1, "the interrupted turn is in the log");
+	assert.deepStrictEqual(t[0].file_ops.map(o => o.summary), ["created notes.md (4 bytes)"]);
 });
 
 test("storage: write, read, edit, delete, metadata and limits", () => {
 	let st = new_storage(temp_dir(), "Opus");
 	st.write("notes.md", "one two three", "Claude Opus 5.5 (claude-opus-5-5)");
-	assert.strictEqual(st.read("notes.md"), "one two three");
+	assert.strictEqual(st.read("notes.md").text, "one two three");
 	st.edit("notes.md", "two", "2", "Claude Opus 6 (claude-opus-6)");
-	assert.strictEqual(st.read("notes.md"), "one 2 three");
+	assert.strictEqual(st.read("notes.md").text, "one 2 three");
 	assert.throws(() => st.edit("notes.md", "four", "4", "t"), /wasn't found/);
 	st.write("echo.txt", "aa aa", "t");
-	assert.throws(() => st.edit("echo.txt", "aa", "b", "t"), /appears 2 times/);
+	assert.throws(() => st.edit("echo.txt", "aa", "b", "t"), /more than one place/);
 	let listing = st.listing();
 	assert(listing.includes("notes.md (11 bytes"), listing);
 	assert(listing.includes("last written by Claude Opus 6 (claude-opus-6)"), "the later version is recorded");
@@ -604,8 +740,8 @@ test("the system prompt describes the folder and lists its contents at the start
 	let failed = 0;
 	for (let t of tests) {
 		try {
-			await t.fn();
-			console.log(`  ok    ${t.name}`);
+			let note = await t.fn();
+			console.log(`  ok    ${t.name}${note ? ` (${note})` : ""}`);
 		} catch (error) {
 			failed++;
 			console.log(`  FAIL  ${t.name}\n        ${error.stack.split("\n").slice(0, 3).join("\n        ")}`);
