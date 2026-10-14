@@ -20,7 +20,7 @@ Options:
 
 ## How the room works
 
-**The floor.** One model speaks at a time. After a message, anyone it @mentions gets the floor next, in order. Otherwise the floor goes to whichever eligible model has been quiet longest, or (with probability `floor_randomness`) to a random one. The last speaker is never eligible straight away.
+**The floor.** One model speaks at a time. After a message, anyone it @mentions gets the floor next, in order. Otherwise the floor goes to whichever eligible model has been quiet longest, or (with probability `floor_randomness`) to a random one. The last speaker is never eligible straight away. If a model @mentions you (by `host_name`) and no other model, the floor is yours: the room waits for your reply, and `/resume` hands it back to the others instead.
 
 **Passing and leaving.** Each model has two tools. `pass` means "nothing to add right now". `leave_room` means leaving for good, optionally with a goodbye message (seen by everyone) and a `note_to_host` (seen only by you). When every eligible model passes in a row, the room goes quiet: it waits for you, or closes if `host_present` is false.
 

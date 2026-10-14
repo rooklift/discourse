@@ -85,6 +85,7 @@ function new_room(cfg, backend, opts = {}) {
 		pending_host: [],						// Host messages waiting for the current turn to finish.
 		paused: false,
 		quiet: false,
+		awaiting_host: null,					// Name of the model that handed the floor to the host, if any.
 		in_flight: null,						// Name of the model whose request is running.
 		abort_controller: null,
 		close_request: null,					// {reason, farewell} once something has asked the room to close.
@@ -111,6 +112,7 @@ const room_prototype = {
 		return {
 			paused: this.paused,
 			quiet: this.quiet,
+			awaiting_host: this.awaiting_host,
 			in_flight: this.in_flight,
 			closing: this.closing,
 			closed: this.closed,
@@ -162,7 +164,7 @@ const room_prototype = {
 				break;
 			}
 
-			if (this.paused || this.quiet) {
+			if (this.paused || this.quiet || this.awaiting_host) {
 				await this.wait();
 				continue;
 			}
@@ -251,6 +253,11 @@ const room_prototype = {
 		return found;
 	},
 
+	mentions_host: function(text) {
+		let escaped = this.cfg.host_name.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&");
+		return new RegExp(`@${escaped}(?![A-Za-z0-9_-])`, "i").test(text);
+	},
+
 	on_message: function(author, text) {
 		this.message_count++;
 		this.passed.clear();
@@ -262,6 +269,13 @@ const room_prototype = {
 		let mentioned = this.mentions_in(text).filter(n => n !== author && this.get_participant(n).present);
 		let rest = this.floor_queue.filter(n => n !== author && !mentioned.includes(n));
 		this.floor_queue = mentioned.concat(rest);
+
+		// A model that hands the floor to the host (and to no other model) gets the host's reply
+		// next, so the room waits rather than asking the others first.
+
+		if (p && this.cfg.host_present && !this.closing && mentioned.length === 0 && this.mentions_host(text)) {
+			this.awaiting_host = p.name;
+		}
 	},
 
 	eligible: function() {
@@ -497,6 +511,7 @@ const room_prototype = {
 		this.closing = true;
 		this.quiet = false;
 		this.paused = false;
+		this.awaiting_host = null;
 		this.emit_state();
 
 		let present = this.present_models();
@@ -555,6 +570,7 @@ const room_prototype = {
 			this.append({kind: "host", text});
 			this.on_message(this.cfg.host_name, text);
 			this.quiet = false;
+			this.awaiting_host = null;
 		}
 	},
 
@@ -565,6 +581,7 @@ const room_prototype = {
 
 	host_resume: function() {
 		this.paused = false;
+		this.awaiting_host = null;				// Decline the floor: the other models carry on.
 		if (this.quiet) {
 			this.quiet = false;					// Nudge: everyone may speak again, including the last speaker.
 			this.passed.clear();
@@ -586,6 +603,7 @@ const room_prototype = {
 		}
 		this.quiet = false;
 		this.paused = false;
+		this.awaiting_host = null;
 		this.emit_state();
 		this.wake();
 		return true;

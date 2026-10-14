@@ -22,7 +22,8 @@ const USE_COLOR = process.stdout.isTTY;
 const HELP = `Type a message and press Enter to say it to the room. @Name gives that model the floor next.
 
   /pause        Stop handing out the floor (the current speaker finishes first)
-  /resume       Carry on; if the room went quiet, everyone may speak again
+  /resume       Carry on; if the room went quiet, everyone may speak again;
+                if a model handed you the floor, let the others carry on instead
   /next Name    Give Name the floor next
   /who          Who is present, and what each has cost
   /cost         Total cost so far
@@ -153,6 +154,7 @@ function main() {
 
 	let was_quiet = false;
 	let was_paused = false;
+	let was_awaiting = null;
 
 	room.on("state", (s) => {
 		if (s.quiet && !was_quiet) {
@@ -161,8 +163,12 @@ function main() {
 		if (s.paused && !was_paused) {
 			print(dim("(Paused. /resume to carry on.)"));
 		}
+		if (s.awaiting_host && s.awaiting_host !== was_awaiting) {
+			print(dim(`(${s.awaiting_host} has handed you the floor. Say something, or /resume to let the others carry on.)`));
+		}
 		was_quiet = s.quiet;
 		was_paused = s.paused;
+		was_awaiting = s.awaiting_host;
 	});
 
 	room.on("closed", () => {

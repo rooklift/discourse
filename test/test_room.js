@@ -335,6 +335,67 @@ test("system prompt template fills in every placeholder", () => {
 	assert(s.includes("isn't shown to anyone"));
 	cfg.show_thinking = true;
 	assert(build_system_prompt(cfg, cfg.participants[1]).includes("Summaries of your private reasoning are saved"));
+	assert(!s.includes("@Host: the room will wait"), "no host-floor note when the host is absent");
+	cfg.host_present = true;
+	assert(build_system_prompt(cfg, cfg.participants[1]).includes("The same goes for @Host: the room will wait for their reply."));
+});
+
+async function until(predicate, ms = 1000) {
+	let start = Date.now();
+	while (!predicate()) {
+		if (Date.now() - start > ms) {
+			throw new Error("timed out waiting");
+		}
+		await new Promise(r => setTimeout(r, 2));
+	}
+}
+
+test("@host hands the floor to the host, and the room waits without asking anyone else", async () => {
+	let backend = fake_backend((name, req, n) => {
+		if (name === "Opus" && n === 0) return speak("Over to you, @host. Where should we go next?");
+		return speak(`${name} ${n}`);
+	});
+	let room = new_room(make_cfg({host_present: true, max_turns: 3, farewell_round: false}), backend, {template: "x", random: () => 0});
+	let done = room.run();
+	await until(() => room.awaiting_host === "Opus");
+	await new Promise(r => setTimeout(r, 20));
+	assert.strictEqual(backend.calls.length, 1, "nobody else was asked while the floor was with the host");
+	room.host_say("Somewhere warm. @Haiku, you start.");
+	await done;
+	assert.strictEqual(turns(room)[1].author, "Haiku");
+	assert.strictEqual(room.awaiting_host, null);
+});
+
+test("/resume declines a floor handed to the host, and the others carry on", async () => {
+	let backend = fake_backend((name, req, n) => {
+		if (name === "Opus" && n === 0) return speak("@Host, any thoughts?");
+		return speak(`${name} ${n}`);
+	});
+	let room = new_room(make_cfg({host_present: true, max_turns: 2, farewell_round: false}), backend, {template: "x", random: () => 0});
+	let done = room.run();
+	await until(() => room.awaiting_host === "Opus");
+	room.host_resume();
+	await done;
+	assert.notStrictEqual(turns(room)[1].author, "Opus", "the model that asked doesn't get the floor straight back");
+	assert(!room.log.some(e => e.kind === "host"));
+});
+
+test("@host alongside a model, or with no host present, doesn't stop the room", async () => {
+	let backend = fake_backend((name, req, n) => {
+		if (name === "Opus" && n === 0) return speak("@Host and @Haiku, what do you both think?");
+		return speak(`${name} ${n}`);
+	});
+	let room = new_room(make_cfg({host_present: true, max_turns: 2, farewell_round: false}), backend, {template: "x", random: () => 0});
+	await room.run();
+	assert.deepStrictEqual(turns(room).map(t => t.author), ["Opus", "Haiku"]);
+
+	backend = fake_backend((name, req, n) => {
+		if (name === "Opus" && n === 0) return speak("What do you think, @Host?");
+		return speak(`${name} ${n}`);
+	});
+	room = new_room(make_cfg({max_turns: 2, farewell_round: false}), backend, {template: "x", random: () => 0});
+	await room.run();
+	assert.strictEqual(turns(room).length, 2, "unattended: the mention is ignored");
 });
 
 test("pricing: cache reads and Haiku's long-prompt tier", () => {

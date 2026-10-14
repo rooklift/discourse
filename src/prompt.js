@@ -37,6 +37,7 @@ function build_system_prompt(cfg, me, template = null) {
 		"{{host_name}}": cfg.host_name,
 		"{{participants}}": participants_list(cfg, me),
 		"{{record_note}}": record_note(cfg),
+		"{{host_floor_note}}": cfg.host_present ? ` The same goes for @${cfg.host_name}: the room will wait for their reply.` : "",
 		"{{date}}": date,
 	};
 
