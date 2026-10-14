@@ -764,6 +764,53 @@ test("storage: another session starting up mid-write doesn't break the write", (
 	assert.strictEqual(st.read("shared.md").text, "after");
 });
 
+test("an event listener that quits mid-step stops the remaining tools", async () => {
+	let root = temp_dir();
+	let backend = fake_backend((name, req, n) => file_step(
+		tool("write_file", {filename: "first.md", content: "1"}),
+		tool("write_file", {filename: "second.md", content: "2"}),
+	));
+	let cfg = make_cfg({storage_dir: root, host_present: true, transcript_dir: temp_dir()});
+	let room = new_room(cfg, backend, {template: "x", random: () => 0});
+	let files = require("../src/transcript").attach_transcript(room, cfg);
+	room.on("event", (e) => {
+		if (e.kind === "file_op") {
+			room.host_quit();
+		}
+	});
+	let at_close = null;
+	room.on("closed", () => {
+		at_close = {turns: turns(room).length, log_length: room.log.length};
+	});
+	await room.run();
+
+	assert(fs.existsSync(path.join(root, "Opus", "first.md")));
+	assert(!fs.existsSync(path.join(root, "Opus", "second.md")), "the second tool never ran");
+	assert.strictEqual(at_close.turns, 1, "the turn was recorded before 'closed' fired");
+	assert.strictEqual(room.log.length, at_close.log_length, "nothing was logged after closing");
+	let t = turns(room)[0];
+	assert.deepStrictEqual(t.file_ops.map(o => o.summary), ["created first.md (1 bytes)"]);
+	assert.strictEqual(t.steps[0].tool_results[1].content, "Not run: the room has closed.");
+	let md = fs.readFileSync(files.md_path, "utf8");
+	assert(md.indexOf("Total cost") > md.lastIndexOf("first.md"), "the summary comes last");
+	assert(!md.includes("second.md"));
+});
+
+test("storage: replacing a file keeps its owner, where permitted", () => {
+	if (process.platform === "win32" || process.getuid() !== 0) {
+		return "skipped: needs POSIX and root to create files owned by someone else";
+	}
+	let st = new_storage(temp_dir(), "Opus");
+	st.write("theirs.md", "hello", "t");
+	let full = path.join(st.folder, "theirs.md");
+	fs.chownSync(full, 1234, 5678);
+	fs.chmodSync(full, 0o640);
+	st.edit("theirs.md", "hello", "goodbye", "t");
+	let after = fs.statSync(full);
+	assert.deepStrictEqual([after.uid, after.gid, after.mode & 0o777], [1234, 5678, 0o640]);
+	assert.strictEqual(st.read("theirs.md").text, "goodbye");
+});
+
 test("storage: replacing a file keeps its permissions", () => {
 	if (process.platform === "win32") {
 		return "skipped: Windows has no POSIX permission bits";

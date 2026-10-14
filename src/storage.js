@@ -351,13 +351,14 @@ function write_all(fd, text) {
 }
 
 // Creates a new file exclusively, writes it in full and syncs it. If anything fails, the
-// partly written file is removed. With a mode, the file is created owner-only, written, and
-// only then given that exact mode (umask aside), so content is never more exposed than asked.
+// partly written file is removed. With "like" (another file's stats), the file is created
+// owner-only, written, and only then given that file's owner and exact mode, so its content
+// is never more exposed than the original's.
 
-function create_text(full, text, mode = null) {
+function create_text(full, text, like = null) {
 	let fd;
 	try {
-		fd = fs.openSync(full, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | NOFOLLOW, mode === null ? 0o666 : 0o600);
+		fd = fs.openSync(full, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | NOFOLLOW, like === null ? 0o666 : 0o600);
 	} catch (error) {
 		if (error.code === "EEXIST") {
 			throw new Error(`${path.basename(full)} appeared while being created. Try again.`);
@@ -367,8 +368,15 @@ function create_text(full, text, mode = null) {
 	try {
 		write_all(fd, text);
 		fs.fsyncSync(fd);
-		if (mode !== null) {
-			fs.fchmodSync(fd, mode);
+		if (like !== null) {
+			if (process.platform !== "win32" && (like.uid !== process.getuid() || like.gid !== process.getgid())) {
+				try {
+					fs.fchownSync(fd, like.uid, like.gid);		// Only possible with the right privileges.
+				} catch (error) {
+					// Not permitted: the replacement stays ours, as any rewrite by us would.
+				}
+			}
+			fs.fchmodSync(fd, like.mode & 0o777);
 		}
 	} catch (error) {
 		close_quietly(fd);
@@ -378,20 +386,24 @@ function create_text(full, text, mode = null) {
 	fs.closeSync(fd);
 }
 
-// Replaces an existing file's content without ever leaving it truncated or half written, and
-// keeping its permissions. The temporary file's name carries our process ID, so another
-// session starting up can tell it's in use (see remove_stale_temps).
+// Replaces an existing file's content without ever leaving it truncated or half written,
+// keeping its permission bits and (where we're allowed) its owner. The temporary file's name
+// carries our process ID, so another session starting up can tell it's in use.
+//
+// Not kept: Windows ACLs and extended attributes, which Node can't read or copy. A replaced
+// file gets the folder's inherited ACL, so set restrictions on the storage folder rather than
+// on individual files.
 
 function replace_text(full, text) {
 	let fd = open_checked(full, fs.constants.O_RDONLY);		// It must still be a plain file.
-	let mode;
+	let like;
 	try {
-		mode = fs.fstatSync(fd).mode & 0o777;
+		like = fs.fstatSync(fd);
 	} finally {
 		close_quietly(fd);
 	}
 	let temp = path.join(path.dirname(full), `${TEMP_PREFIX}${process.pid}-${crypto.randomBytes(8).toString("hex")}`);
-	create_text(temp, text, mode);
+	create_text(temp, text, like);
 	try {
 		fs.renameSync(temp, full);
 	} catch (error) {

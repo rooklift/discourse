@@ -449,10 +449,13 @@ const room_prototype = {
 			}
 
 			let turn_text = steps.map(s => s.text).concat(response_text(response)).join("");
-			let step = this.make_step(p, response, turn_text);
-			steps.push(step);
+			let step = this.make_step(p, response, turn_text, steps);
 
-			if (step.ends_turn || this.closed) {
+			if (this.closed) {						// Closed while running this step's tools (by an event
+				stop_quietly();						// listener): host_quit() has already recorded the turn.
+				return;
+			}
+			if (step.ends_turn) {
 				break;
 			}
 			if (steps.length >= MAX_TOOL_STEPS) {
@@ -518,9 +521,11 @@ const room_prototype = {
 	},
 
 	// Turns one API response into a step: the blocks to replay, the tool results to send back
-	// (running any file tools now), and whether the turn is over.
+	// (running any file tools now), and whether the turn is over. The step joins the turn's
+	// steps before any tool runs or any event fires, so if a listener closes the room midway,
+	// host_quit() records it with whatever it has done so far.
 
-	make_step: function(p, response, turn_text) {
+	make_step: function(p, response, turn_text, steps) {
 
 		let usage = response.usage || {};
 		let cost = this.account(p, usage);
@@ -540,6 +545,7 @@ const room_prototype = {
 			cost: cost,
 			ends_turn: true,
 		};
+		steps.push(step);
 
 		if (step.stop_reason === "max_tokens" || step.stop_reason === "refusal") {
 
@@ -560,6 +566,10 @@ const room_prototype = {
 		let used_files = false;
 
 		for (let t of tool_uses) {
+			if (this.closed) {						// Closed mid-step: run nothing more.
+				step.tool_results.push({tool_use_id: t.id, content: "Not run: the room has closed.", is_error: true});
+				continue;
+			}
 			if (t.name === "pass") {
 				step.pass = true;
 				step.tool_results.push({tool_use_id: t.id, content: turn_text.trim() ? "Your message was posted." : "You passed."});
@@ -575,12 +585,12 @@ const room_prototype = {
 					r = {content: "Error: the file tool failed unexpectedly.", is_error: true, summary: `tool ${t.name} failed unexpectedly`};
 				}
 				step.file_ops.push({tool: t.name, summary: r.summary, is_error: r.is_error});
+				step.tool_results.push({tool_use_id: t.id, content: r.content, is_error: r.is_error});
 
 				// Logged now, not at the end of the turn, so the transcript has it even if the
-				// session dies during a later step.
+				// session dies during a later step. The step is complete before listeners run.
 
 				this.append({kind: "file_op", author: p.name, tool: t.name, summary: r.summary, is_error: r.is_error});
-				step.tool_results.push({tool_use_id: t.id, content: r.content, is_error: r.is_error});
 			} else {
 				step.tool_results.push({tool_use_id: t.id, content: `Unknown tool: ${t.name}`, is_error: true});
 			}
