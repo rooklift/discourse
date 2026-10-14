@@ -1,0 +1,16 @@
+{
+	"name": "discourse",
+	"version": "0.1.0",
+	"description": "A chat room where several Claude models can talk with each other, and with you.",
+	"main": "cli.js",
+	"scripts": {
+		"start": "node cli.js",
+		"test": "node test/test_room.js"
+	},
+	"engines": {
+		"node": ">=20"
+	},
+	"dependencies": {
+		"@anthropic-ai/sdk": "^0.133.0"
+	}
+}
