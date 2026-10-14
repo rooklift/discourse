@@ -908,6 +908,33 @@ test("calculator: arithmetic, precedence, functions and limits", () => {
 	}
 });
 
+test("calculator: no expression can tie up the room", () => {
+	// Calculation is synchronous, so a slow one would freeze the room and the host's controls.
+	let hostile = [
+		"comb(1e100,1e99)", "perm(1e100,1e99)", "comb(1e300,2)", "gcd(1e300,3)", "lcm(1e20,3)",
+		"comb(9007199254740991,4503599627370495)", "perm(9007199254740991,9007199254740991)",
+		"comb(9007199254740991,10000)", "perm(9007199254740991,10000)", "comb(20000,10000)", "perm(10000,10000)",
+		"gcd(9007199254740991,9007199254740990)",
+		Array(30).fill("comb(9007199254740991,4503599627370495)").join("+"),
+		Array(30).fill("perm(10000,10000)").join("+"),
+	];
+	for (let expr of hostile) {
+		let start = process.hrtime.bigint();
+		try {
+			calculate(expr);
+		} catch (error) {
+			// Refusing is fine too; what matters is finishing quickly.
+		}
+		let ms = Number(process.hrtime.bigint() - start) / 1e6;
+		assert(ms < 100, `${expr.slice(0, 50)} took ${ms.toFixed(1)} ms`);
+	}
+	assert.throws(() => calculate("comb(1e100,1e99)"), /no bigger than 9007199254740991/);
+	assert.throws(() => calculate("lcm(1e20,3)"), /^Error: lcm needs/);
+	assert(calculate("comb(2000,1000)").startsWith("Infinity"));
+	assert.strictEqual(calculate("comb(1000,500)"), "2.70288240945437e+299");
+	assert.strictEqual(calculate("perm(10,3)"), "720");
+});
+
 test("calculator: model input can never run as code", () => {
 	let probes = ["process.exit(1)", "require('fs')", "constructor", "__proto__", "toString(1)", "valueOf()", "this", "globalThis",
 		"Math.max(1)", "max.constructor", "`1`", "1;2", "a=1", "[1]", "{}", "'x'", "\"x\"", "1 && 2", "eval(1)", "Function('')"];

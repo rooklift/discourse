@@ -21,13 +21,22 @@ const CONSTANTS = {
 	phi: (1 + Math.sqrt(5)) / 2,
 };
 
+// Whole numbers small enough for doubles to represent exactly. Beyond 2^53 a "whole number"
+// may not be the number that was typed, and loops over it could run practically forever.
+
 function need_integer(name, ...xs) {
 	for (let x of xs) {
-		if (!Number.isInteger(x)) {
-			throw new Error(`${name} needs whole numbers.`);
+		if (!Number.isSafeInteger(x)) {
+			throw new Error(`${name} needs whole numbers no bigger than ${Number.MAX_SAFE_INTEGER} in size.`);
 		}
 	}
 }
+
+// No loop here may run long, since a calculation blocks the whole room until it's done.
+// Every comb and perm factor is at least 1, so a result too big for a double overflows within
+// about a thousand steps; past MAX_STEPS the answer is certainly Infinity.
+
+const MAX_STEPS = 10000;
 
 function factorial(n) {
 	need_integer("factorial", n);
@@ -47,8 +56,11 @@ function comb(n, k) {
 		return 0;
 	}
 	k = Math.min(k, n - k);
+	if (k > MAX_STEPS) {
+		return Infinity;
+	}
 	let r = 1;
-	for (let i = 1; i <= k; i++) {
+	for (let i = 1; i <= k && r !== Infinity; i++) {
 		r = r * (n - k + i) / i;
 	}
 	return Math.round(r);
@@ -59,14 +71,17 @@ function perm(n, k) {
 	if (k < 0 || n < 0 || k > n) {
 		return 0;
 	}
+	if (k > MAX_STEPS) {
+		return Infinity;
+	}
 	let r = 1;
-	for (let i = 0; i < k; i++) {
+	for (let i = 0; i < k && r !== Infinity; i++) {
 		r *= n - i;
 	}
 	return r;
 }
 
-function gcd(a, b) {
+function gcd(a, b) {						// Euclid's algorithm: at most about 80 steps for safe integers.
 	need_integer("gcd", a, b);
 	a = Math.abs(a);
 	b = Math.abs(b);
@@ -109,7 +124,10 @@ const FUNCTIONS = {
 	comb: [2, 2, comb],
 	perm: [2, 2, perm],
 	gcd: [2, 2, gcd],
-	lcm: [2, 2, (a, b) => (a === 0 || b === 0) ? 0 : Math.abs(a * b) / gcd(a, b)],
+	lcm: [2, 2, (a, b) => {
+		need_integer("lcm", a, b);
+		return (a === 0 || b === 0) ? 0 : Math.abs(a * b) / gcd(a, b);
+	}],
 };
 
 function tokenize(src) {
