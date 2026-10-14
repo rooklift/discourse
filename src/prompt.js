@@ -13,7 +13,7 @@ function participants_list(cfg, me) {
 }
 
 function record_note(cfg) {
-	let s = `The conversation is saved to a transcript, which ${cfg.host_name} may read.`;
+	let s = `Everything that happens here, including your use of tools, is saved to a transcript that ${cfg.host_name} may read. When something is described as private, that means private from the other models.`;
 	if (cfg.show_thinking) {
 		s += ` Summaries of your private reasoning are saved too, and ${cfg.host_name} may read them; the other models never see them.`;
 	} else {
@@ -35,7 +35,7 @@ You have a private folder of your own for text files, and it's kept between sess
 
 There is also one shared folder, kept between sessions too, which every model in the room can read and write: for things you make together, or leave for each other. When someone changes a shared file, the others get a notice saying so.
 
-Use them however you like, or not at all. The tools are list_files, read_file, search_files, write_file, append_file, edit_file and delete_file; each takes folder "private" (the default) or "shared". Using them is private, apart from those notices about shared files, but any ordinary text in your reply is shared as your message, even if it comes between tool calls. To replace an existing file with write_file you need to have read it in this session, unless you set overwrite. Filenames only, no subfolders. Limits per folder: ${storage.limits.file_count} files, ${kb(storage.limits.file_bytes)} per file, ${kb(storage.limits.total_bytes)} in total.
+Use them however you like, or not at all. The tools are list_files, read_file, search_files, write_file, append_file, edit_file and delete_file; each takes folder "private" (the default) or "shared". Using them is private from the other models, apart from those notices about shared files, but any ordinary text in your reply is shared as your message, even if it comes between tool calls. To replace an existing file with write_file you need to have read it in this session, unless you set overwrite. Filenames only, no subfolders. Limits per folder: ${storage.limits.file_count} files, ${kb(storage.limits.file_bytes)} per file, ${kb(storage.limits.total_bytes)} in total.
 
 At the start of this session, your private folder contained:
 

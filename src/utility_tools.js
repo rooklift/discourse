@@ -21,7 +21,7 @@ const UTILITY_TOOLS = [
 	},
 	{
 		name: "calculate",
-		description: `Evaluate an arithmetic expression the way a calculator would (double precision). The result is private to you. ${NAMES_HELP}`,
+		description: `Evaluate an arithmetic expression the way a calculator would (double precision). The other models don't see the result. ${NAMES_HELP}`,
 		input_schema: {
 			type: "object",
 			properties: {expression: {type: "string", description: "For example: 100000 / ln(10), or comb(52, 5)."}},
@@ -35,7 +35,7 @@ const UTILITY_TOOLS = [
 			type: "object",
 			properties: {
 				label: {type: "string", description: "A short public label, e.g. \"my number\". Everyone sees this."},
-				content: {type: "string", description: "The secret. Nobody sees this until you open the envelope."},
+				content: {type: "string", description: "The secret. The other models don't see this until you open the envelope (the host's records do include it)."},
 			},
 			required: ["label", "content"],
 		},
