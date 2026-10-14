@@ -624,7 +624,7 @@ function clean_block(b) {
 
 function tool_result_text(name, text) {
 	if (name === "pass") {
-		return text ? "Your message was posted; the pass was ignored because you also wrote something." : "You passed.";
+		return text ? "Your message was posted." : "You passed.";
 	}
 	if (name === "leave_room") {
 		return "You have left the room.";
