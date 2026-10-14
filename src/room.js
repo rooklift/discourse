@@ -48,7 +48,8 @@ const CLOSING_PHRASES = {
 };
 
 const MAX_CONSECUTIVE_ERRORS = 3;
-const MAX_TOOL_STEPS = 10;					// API calls per turn, when a model uses its file tools.
+const MAX_TOOL_STEPS = 10;
+const MAX_IMAGES = 20;						// Images the host can share per session; every request resends them all.					// API calls per turn, when a model uses its file tools.
 
 // ------------------------------------------------------------------------------------------------
 
@@ -98,7 +99,8 @@ function new_room(cfg, backend, opts = {}) {
 		cost_known: true,
 		consecutive_errors: 0,
 
-		pending_host: [],						// Host messages waiting for the current turn to finish.
+		pending_host: [],						// Host messages ({text, images}) waiting for the current turn to finish.
+		image_count: 0,							// Images shared so far, for numbering.
 		paused: false,
 		quiet: false,
 		awaiting_host: null,					// Name of the model that handed the floor to the host, if any.
@@ -208,8 +210,9 @@ const room_prototype = {
 		if (this.cfg.first_speaker) {
 			this.floor_queue.push(this.cfg.first_speaker);
 		}
-		if (this.cfg.opening_message) {
-			this.pending_host.push(this.cfg.opening_message);
+		let opening_images = Array.isArray(this.cfg.opening_images) ? this.cfg.opening_images : [];
+		if (this.cfg.opening_message || opening_images.length > 0) {
+			this.pending_host.push({text: this.cfg.opening_message || "", images: opening_images});
 		}
 		this.emit_state();
 	},
@@ -332,7 +335,21 @@ const room_prototype = {
 			return `<notice>${entry.text}</notice>`;
 		}
 		if (entry.kind === "host") {
-			return `<message from="${this.cfg.host_name} (host)">\n${entry.text}\n</message>`;
+			let images = entry.images || [];
+			if (images.length === 0) {
+				return `<message from="${this.cfg.host_name} (host)">\n${entry.text}\n</message>`;
+			}
+
+			// The message names its images, then each follows with a label, as the vision docs
+			// suggest, so everyone can refer to "Image 2" later.
+
+			let names = images.map(im => `Image ${im.number}`).join(", ");
+			let blocks = [{type: "text", text: `<message from="${this.cfg.host_name} (host)">\n${entry.text ? entry.text + "\n" : ""}[shared ${images.length === 1 ? "an image" : "images"}: ${names}]\n</message>`}];
+			for (let im of images) {
+				blocks.push({type: "text", text: `Image ${im.number}, shared by ${this.cfg.host_name}:`});
+				blocks.push({type: "image", source: {type: "base64", media_type: im.media_type, data: im.data}});
+			}
+			return blocks;
 		}
 		if (entry.kind === "turn" && entry.author !== me.name) {
 			if (entry.text) {
@@ -358,13 +375,18 @@ const room_prototype = {
 	build_view: function(me) {
 
 		let messages = [];
-		let parts = [];
+		let parts = [];							// Content blocks; neighbouring text is merged on flush.
 		let tool_results = [];
 
 		let flush = () => {
 			let content = tool_results.map(tool_result_block);
-			if (parts.length > 0) {
-				content.push({type: "text", text: parts.join("\n\n")});
+			for (let block of parts) {
+				let last = content[content.length - 1];
+				if (block.type === "text" && last && last.type === "text") {
+					last.text += "\n\n" + block.text;
+				} else {
+					content.push(Object.assign({}, block));
+				}
 			}
 			if (content.length > 0) {
 				messages.push({role: "user", content});
@@ -389,9 +411,11 @@ const room_prototype = {
 					tool_results = step.tool_results.slice();
 				}
 			} else {
-				let s = this.render_for(entry, me);
-				if (s) {
-					parts.push(s);
+				let r = this.render_for(entry, me);
+				if (Array.isArray(r)) {
+					parts.push(...r);
+				} else if (r) {
+					parts.push({type: "text", text: r});
 				}
 			}
 		}
@@ -742,20 +766,35 @@ const room_prototype = {
 	// --------------------------------------------------------------------------------------------
 	// Host controls. These are what a front end calls.
 
-	host_say: function(text) {
-		text = String(text).trim();
-		if (!text || this.closed) {
-			return;
+	// images: prepared images from src/images.js ({media_type, data, width, height, tokens, source}).
+
+	// Returns false if nothing was queued (empty, closed, or over the image limit).
+
+	host_say: function(text, images = []) {
+		text = String(text ?? "").trim();
+		images = (Array.isArray(images) ? images : [images]).filter(Boolean);
+		if ((!text && images.length === 0) || this.closed) {
+			return false;
 		}
-		this.pending_host.push(text);			// Applied between turns, so no model's history shows a
+		if (this.images_left() < images.length) {
+			return false;
+		}
+		this.pending_host.push({text, images});	// Applied between turns, so no model's history shows a
 		this.wake();							// message it didn't actually see before replying.
+		return true;
+	},
+
+	images_left: function() {
+		let pending = this.pending_host.reduce((n, m) => n + (m.images || []).length, 0);
+		return MAX_IMAGES - this.image_count - pending;
 	},
 
 	apply_pending_host_messages: function() {
 		while (this.pending_host.length > 0) {
-			let text = this.pending_host.shift();
-			this.append({kind: "host", text});
-			this.on_message(this.cfg.host_name, text);
+			let m = this.pending_host.shift();
+			let images = (m.images || []).map(im => Object.assign({}, im, {number: ++this.image_count}));
+			this.append(images.length ? {kind: "host", text: m.text, images} : {kind: "host", text: m.text});
+			this.on_message(this.cfg.host_name, m.text);
 			this.quiet = false;
 			this.awaiting_host = null;
 		}
@@ -846,4 +885,4 @@ function tool_result_block(tr) {
 	return block;
 }
 
-module.exports = {new_room, TOOLS};
+module.exports = {new_room, TOOLS, MAX_IMAGES};

@@ -2,24 +2,27 @@
 
 // Terminal front end.
 //
-// Usage: node cli.js [--config path/to/config.json] [--random[=N]] [opening message...]
+// Usage: node cli.js [--config path/to/config.json] [--random[=N]] [--image path]... [opening message...]
 //
 // Any words after the options become the host's opening message, overriding opening_message
 // in the config. Use -- before a message that itself starts with a dash.
 //
 // --random (or -r) adds N words (default 5) picked at random from the config's word_list to
 // the opening message, as an optional seed for the conversation.
+//
+// --image (or -i) attaches an image to the opening message. It can be given more than once.
 
-const USAGE = "Usage: node cli.js [--config path/to/config.json] [--random[=N]] [opening message...]";
+const USAGE = "Usage: node cli.js [--config path/to/config.json] [--random[=N]] [--image path]... [opening message...]";
 const DEFAULT_RANDOM_WORDS = 5;
 
 const path = require("path");
 const readline = require("readline");
 const {load_config, read_api_key} = require("./src/config");
 const {new_backend} = require("./src/backend");
-const {new_room} = require("./src/room");
+const {new_room, MAX_IMAGES} = require("./src/room");
 const {attach_transcript} = require("./src/transcript");
 const {load_words, pick_words, word_seed_message} = require("./src/words");
+const {prepare_image} = require("./src/images");
 
 const COLORS = [36, 33, 32, 34, 31, 35];		// ANSI: cyan, yellow, green, blue, red, magenta.
 const USE_COLOR = process.stdout.isTTY;
@@ -30,6 +33,8 @@ const HELP = `Type a message and press Enter to say it to the room. @Name gives 
   /resume       Carry on; if the room went quiet, everyone may speak again;
                 if a model handed you the floor, let the others carry on instead
   /next Name    Give Name the floor next
+  /image path [caption]
+                Share an image with the room (quote the path if it has spaces)
   /who          Who is present, and what each has cost
   /cost         Total cost so far
   /end          Close the room, with a farewell round
@@ -65,7 +70,7 @@ function money(n) {
 
 function parse_args(argv) {
 
-	let opts = {config: path.join(__dirname, "config.json"), message: "", random: 0};
+	let opts = {config: path.join(__dirname, "config.json"), message: "", random: 0, images: []};
 	let words = [];
 
 	for (let i = 0; i < argv.length; i++) {
@@ -85,6 +90,11 @@ function parse_args(argv) {
 				throw new Error(`${arg} needs a path`);
 			}
 			opts.config = argv[++i];
+		} else if (arg === "--image" || arg === "-i") {
+			if (i + 1 >= argv.length) {
+				throw new Error(`${arg} needs a path`);
+			}
+			opts.images.push(argv[++i]);
 		} else if (arg === "--help" || arg === "-h") {
 			opts.help = true;
 		} else if (arg.startsWith("-") && words.length === 0) {
@@ -99,7 +109,7 @@ function parse_args(argv) {
 	return opts;
 }
 
-function main() {
+async function main() {
 
 	let opts;
 	let cfg;
@@ -120,6 +130,13 @@ function main() {
 			let seed = word_seed_message(pick_words(load_words(cfg.word_list), opts.random));
 			cfg.opening_message = cfg.opening_message ? `${cfg.opening_message}\n\n${seed}` : seed;
 		}
+		cfg.opening_images = [];
+		for (let p of opts.images) {
+			cfg.opening_images.push(await prepare_image(p));
+		}
+		if (cfg.opening_images.length > MAX_IMAGES) {
+			throw new Error(`At most ${MAX_IMAGES} images can be shared in a session.`);
+		}
 	} catch (error) {
 		console.error(`Error: ${error.message}\n${USAGE}`);
 		process.exit(1);
@@ -139,7 +156,11 @@ function main() {
 		if (entry.kind === "notice") {
 			print(dim(`-- ${entry.text}`));
 		} else if (entry.kind === "host") {
-			print(`${paint(cfg.host_name, 1)}: ${entry.text}`);
+			let shown = (entry.images || []).map(im => `[Image ${im.number}: ${im.source}, ${im.width}x${im.height}, about ${im.tokens} tokens]`);
+			if (entry.text) {
+				shown.push(entry.text);
+			}
+			print(`${paint(cfg.host_name, 1)}: ${shown.join(" ")}`);
 		} else if (entry.kind === "tool_op") {
 			print(paint(`(${entry.author} ${entry.summary})`, entry.is_error ? 31 : 2));
 		} else if (entry.kind === "error") {
@@ -251,6 +272,12 @@ function handle_line(room, cfg, line) {
 
 	let [cmd, ...args] = s.split(/\s+/);
 
+	if (cmd.toLowerCase() === "/image") {
+		share_image(room, s.slice(cmd.length).trim());
+		rl.prompt();
+		return;
+	}
+
 	switch (cmd.toLowerCase()) {
 	case "/help":
 		print(HELP);
@@ -287,4 +314,41 @@ function handle_line(room, cfg, line) {
 	rl.prompt();
 }
 
-main();
+// "/image path caption", where the path may be quoted ("..." or '...') if it has spaces,
+// as terminals often do when a file is dragged in.
+
+function split_path_and_caption(rest) {
+	let m = /^(["'])(.*?)\1\s*(.*)$/s.exec(rest);
+	if (m) {
+		return {file: m[2], caption: m[3]};
+	}
+	let space = rest.search(/\s/);
+	return space === -1 ? {file: rest, caption: ""} : {file: rest.slice(0, space), caption: rest.slice(space).trim()};
+}
+
+function share_image(room, rest) {
+	let {file, caption} = split_path_and_caption(rest);
+	if (!file) {
+		print(dim("(Usage: /image path [caption])"));
+		return;
+	}
+	if (room.images_left() < 1) {
+		print(dim(`(The limit of ${MAX_IMAGES} images for this session has been reached.)`));
+		return;
+	}
+	print(dim(`(Preparing ${path.basename(file)}...)`));
+	prepare_image(file).then(image => {
+		if (!room.host_say(caption, [image])) {
+			print(dim("(The image couldn't be shared: the room has closed or the image limit was reached.)"));
+		} else if (room.state().in_flight) {
+			print(dim("(Your image will appear when the current speaker finishes.)"));
+		}
+	}).catch(error => {
+		print(paint(`(Couldn't share the image: ${error.message})`, 31));
+	});
+}
+
+main().catch(error => {
+	console.error(error);
+	process.exit(1);
+});

@@ -1133,6 +1133,108 @@ test("envelopes in the room: sealed in private, opened in public, opened on leav
 	assert(!views.some(v => v.name !== "Opus" && v.text.includes("rain tomorrow")), "and no other model ever sees the never-opened envelope");
 });
 
+// ------------------------------------------------------------------------------------------------
+// Images the host shares.
+
+const sharp = require("sharp");
+const {prepare_image} = require("../src/images");
+
+async function make_image(dir, name, width, height, opts = {}) {
+	let full = path.join(dir, name);
+	let channels = opts.alpha ? 4 : 3;
+	let background = opts.alpha ? {r: 10, g: 20, b: 30, alpha: 0.5} : {r: 200, g: 100, b: 50};
+	let img = sharp({create: {width, height, channels, background}});
+	img = name.endsWith(".png") ? img.png() : img.jpeg();
+	if (opts.orientation) {
+		img = img.withMetadata({orientation: opts.orientation});
+	}
+	await img.toFile(full);
+	return full;
+}
+
+test("images: downscaled within limits, alpha kept as PNG, EXIF rotation applied", async () => {
+	let dir = temp_dir();
+	let big = await prepare_image(await make_image(dir, "big.jpg", 4000, 3000));
+	assert.strictEqual(big.media_type, "image/jpeg");
+	assert(big.width * big.height <= 1200000 + 4000, `${big.width}x${big.height}`);
+	assert(Math.max(big.width, big.height) <= 1568);
+	assert(Math.abs(big.width / big.height - 4 / 3) < 0.01, "aspect ratio kept");
+	assert.strictEqual(big.tokens, Math.ceil(big.width / 28) * Math.ceil(big.height / 28));
+	assert(big.tokens <= 1600, `${big.tokens} tokens`);
+	assert.strictEqual(big.source, "big.jpg");
+	let decoded = await sharp(Buffer.from(big.data, "base64")).metadata();
+	assert.deepStrictEqual([decoded.width, decoded.height], [big.width, big.height], "the data matches the reported size");
+
+	let tall = await prepare_image(await make_image(dir, "tall.jpg", 300, 5000));
+	assert.strictEqual(tall.height, 1568, "the long edge is capped");
+
+	let small = await prepare_image(await make_image(dir, "small.png", 200, 100, {alpha: true}));
+	assert.deepStrictEqual([small.width, small.height, small.media_type], [200, 100, "image/png"], "small images aren't enlarged; alpha stays PNG");
+
+	let rotated = await prepare_image(await make_image(dir, "rotated.jpg", 400, 200, {orientation: 6}));
+	assert.deepStrictEqual([rotated.width, rotated.height], [200, 400], "EXIF orientation is applied");
+
+	fs.writeFileSync(path.join(dir, "fake.jpg"), "not an image");
+	await assert.rejects(prepare_image(path.join(dir, "fake.jpg")), /Couldn't read fake.jpg as an image/);
+	await assert.rejects(prepare_image(path.join(dir, "missing.jpg")), /Image not found/);
+	await assert.rejects(prepare_image(dir), /Not a file/);
+	await assert.rejects(prepare_image(""), /No image file given/);
+});
+
+test("images in the room: every model sees them, labelled, and the transcript saves them as files", async () => {
+	let dir = temp_dir();
+	let image = await prepare_image(await make_image(dir, "lighthouse.jpg", 800, 600));
+	let backend = fake_backend((name, req, n) => speak(`${name} ${n}`));
+	let cfg = make_cfg({max_turns: 3, farewell_round: false, transcript_dir: temp_dir(), opening_message: "Look at this, @Haiku.", opening_images: [image]});
+	let room = new_room(cfg, backend, {template: "x", random: () => 0});
+	let files = require("../src/transcript").attach_transcript(room, cfg);
+	await room.run();
+
+	assert.strictEqual(backend.calls[0].name, "Haiku", "a mention in the caption still passes the floor");
+	for (let c of backend.calls) {
+		let blocks = c.req.messages.flatMap(m => m.content);
+		let images = blocks.filter(b => b.type === "image");
+		assert.strictEqual(images.length, 1, `${c.name} sees the image`);
+		assert.deepStrictEqual(images[0].source, {type: "base64", media_type: "image/jpeg", data: image.data});
+		let i = blocks.indexOf(images[0]);
+		assert.strictEqual(blocks[i - 1].type, "text");
+		assert(blocks[i - 1].text.endsWith("Image 1, shared by Host:"), "labelled just before the image");
+		assert(blocks[i - 1].text.includes("Look at this, @Haiku.\n[shared an image: Image 1]"));
+	}
+	let later = backend.calls.find(c => c.name === "Sonnet").req.messages[0].content;
+	assert.strictEqual(later[later.length - 1].type, "text", "text after the image stays a separate block");
+	assert(later[later.length - 1].text.includes("<message from=\"Haiku\">"));
+
+	let jsonl = fs.readFileSync(files.jsonl_path, "utf8");
+	assert(!jsonl.includes(image.data.slice(0, 100)), "no image data in the JSONL");
+	let entry = jsonl.trim().split("\n").map(JSON.parse).find(e => e.kind === "host");
+	assert.strictEqual(entry.images[0].file.endsWith("-images/image-1.jpg"), true);
+	let saved = path.join(path.dirname(files.jsonl_path), entry.images[0].file);
+	assert.strictEqual(fs.readFileSync(saved).toString("base64"), image.data, "the saved file is exactly what was sent");
+	let md = fs.readFileSync(files.md_path, "utf8");
+	assert(md.includes(`![Image 1: lighthouse.jpg](${entry.images[0].file})`));
+	assert(room.log.find(e => e.kind === "host").images[0].data === image.data, "the room's own log still has the data");
+});
+
+test("images: numbered across messages, image-only messages allowed, and capped per session", async () => {
+	let dir = temp_dir();
+	let image = await prepare_image(await make_image(dir, "a.jpg", 100, 100));
+	let {MAX_IMAGES} = require("../src/room");
+	let backend = fake_backend((name, req, n) => speak(`${name} ${n}`));
+	let room = new_room(make_cfg({host_present: true, max_turns: 2, farewell_round: false}), backend, {template: "x", random: () => 0});
+	assert.strictEqual(room.host_say("", [image]), true, "an image with no caption is fine");
+	assert.strictEqual(room.host_say("two more", [image, image]), true);
+	assert.strictEqual(room.host_say(""), false, "but an empty message isn't");
+	assert.strictEqual(room.images_left(), MAX_IMAGES - 3);
+	assert.strictEqual(room.host_say("too many", Array(MAX_IMAGES).fill(image)), false);
+	await room.run();
+	let hosts = room.log.filter(e => e.kind === "host");
+	assert.deepStrictEqual(hosts.map(h => h.images.map(im => im.number)), [[1], [2, 3]]);
+	let text = backend.calls[0].req.messages[0].content.filter(b => b.type === "text").map(b => b.text).join("\n");
+	assert(text.includes("[shared an image: Image 1]") && text.includes("two more\n[shared images: Image 2, Image 3]"));
+	assert.strictEqual(room.images_left(), MAX_IMAGES - 3);
+});
+
 test("config: the name 'shared' is reserved", () => {
 	let dir = temp_dir();
 	let key = path.join(dir, "key.txt");

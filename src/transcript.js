@@ -3,6 +3,7 @@
 // Writes two files per session, appending as events happen so nothing is lost on a crash:
 //   <stamp>.jsonl   Everything, including raw content blocks, usage and costs. One JSON object per line.
 //   <stamp>.md      A readable transcript.
+// plus, if the host shares images, a <stamp>-images folder holding each image as sent.
 
 const fs = require("fs");
 const path = require("path");
@@ -16,9 +17,12 @@ function attach_transcript(room, cfg) {
 
 	fs.mkdirSync(cfg.transcript_dir, {recursive: true});
 
-	let base = path.join(cfg.transcript_dir, stamp());
+	let session = stamp();
+	let base = path.join(cfg.transcript_dir, session);
 	let jsonl_path = base + ".jsonl";
 	let md_path = base + ".md";
+	let images_dir = base + "-images";
+	let images_rel = session + "-images";
 
 	let write_json = (o) => fs.appendFileSync(jsonl_path, JSON.stringify(o) + "\n");
 	let write_md = (s) => fs.appendFileSync(md_path, s);
@@ -26,16 +30,35 @@ function attach_transcript(room, cfg) {
 	write_json({
 		kind: "meta",
 		time: new Date().toISOString(),
-		config: Object.assign({}, cfg, {participants: cfg.participants.map(p => Object.assign({}, p, {price_tiers: undefined}))}),
+		config: Object.assign({}, cfg, {
+			participants: cfg.participants.map(p => Object.assign({}, p, {price_tiers: undefined})),
+			opening_images: (cfg.opening_images || []).map(im => im.source),		// Names only; the images are saved below.
+		}),
 		system_prompts: Object.fromEntries(room.participants.map(p => [p.name, p.system])),
 	});
 
 	let names = cfg.participants.map(p => `${p.name} (${p.full_name})`).join(", ");
 	write_md(`# Discourse, ${new Date().toLocaleString("en-US")}\n\nParticipants: ${names}, and ${cfg.host_name} (host).\n\n---\n\n`);
 
+	// Images are saved as files and referenced by name, so the transcripts stay small.
+
+	let save_images = (entry) => {
+		if (entry.kind !== "host" || !entry.images || entry.images.length === 0) {
+			return entry;
+		}
+		fs.mkdirSync(images_dir, {recursive: true});
+		let images = entry.images.map(im => {
+			let file = `image-${im.number}.${im.media_type === "image/png" ? "png" : "jpg"}`;
+			fs.writeFileSync(path.join(images_dir, file), Buffer.from(im.data, "base64"));
+			return {number: im.number, file: `${images_rel}/${file}`, source: im.source, media_type: im.media_type, width: im.width, height: im.height, tokens: im.tokens};
+		});
+		return Object.assign({}, entry, {images});
+	};
+
 	room.on("event", (entry) => {
-		write_json(entry);
-		write_md(markdown_for(entry, cfg));
+		let saved = save_images(entry);
+		write_json(saved);
+		write_md(markdown_for(saved, cfg));
 	});
 
 	room.on("closed", () => {
@@ -58,7 +81,11 @@ function markdown_for(entry, cfg) {
 	}
 
 	if (entry.kind === "host") {
-		return `**${cfg.host_name}** (host)\n\n${entry.text}\n\n`;
+		let s = `**${cfg.host_name}** (host)\n\n`;
+		for (let im of entry.images || []) {
+			s += `![Image ${im.number}: ${im.source}](${encodeURI(im.file)})\n\n`;
+		}
+		return s + (entry.text ? `${entry.text}\n\n` : "");
 	}
 
 	if (entry.kind === "tool_op") {
