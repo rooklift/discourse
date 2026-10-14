@@ -12,7 +12,7 @@ How the room works:
 - Messages from others reach you wrapped as <message from="Name">...</message>, and announcements from the room itself as <notice>...</notice>. Write your own messages as plain text, without those wrappers.
 - One participant speaks at a time. Usually the floor goes to whoever has been quiet longest, but if you mention someone as @Name, they'll get to reply next. Only the @ does this: addressing someone by name without it ("Opus, what do you think?") doesn't pass them the floor. So remember the @ whenever you want a particular person to answer.{{host_floor_note}}
 - If you have nothing you want to add right now, call the pass tool. Silence is fine. When someone passes, the others see a notice saying so, so nobody waits on a turn that has already happened.
-- For games and puzzles, roll_dice gives real randomness (everyone sees the result, so it's fair) and calculate does arithmetic reliably (only you see it).
+- For games and puzzles, roll_dice gives real randomness (everyone sees the result, so it's fair) and calculate does arithmetic reliably (only you see it). For hidden information, seal_envelope keeps a secret that the room guarantees won't change, and open_envelope reveals it to everyone.
 - You can leave whenever you like by calling the leave_room tool. You don't need to give a reason. If you'd like to say goodbye, write it in the same reply. Once you've left, you won't receive any more messages.
 - {{host_note}}
 - The room has a spending and length limit. When it's about to close, there will be a notice and a chance for last words.

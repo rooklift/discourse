@@ -87,9 +87,9 @@ function validate_request(req) {
 	}
 	assert.strictEqual(typeof req.system, "string");
 	let names = req.tools.map(t => t.name);
-	assert.deepStrictEqual(names.slice(0, 4), ["pass", "leave_room", "roll_dice", "calculate"]);
+	assert.deepStrictEqual(names.slice(0, 6), ["pass", "leave_room", "roll_dice", "calculate", "seal_envelope", "open_envelope"]);
 	assert.strictEqual(new Set(names).size, names.length, "tool names are unique");
-	assert(names.length === 4 || names.length === 11, "either no file tools or all seven");
+	assert(names.length === 6 || names.length === 13, "either no file tools or all seven");
 }
 
 // A fake backend. script(name, req, n) returns a response (or throws). Records all requests.
@@ -1068,6 +1068,69 @@ test("in the room: shared changes and dice are announced to others; private tool
 	let opus_later = backend.calls.filter(c => c.name === "Opus")[2];
 	assert(!opus_later || !last_user_text(opus_later.req).includes("Opus created story.md"), "no notice about your own change");
 	assert.deepStrictEqual(turns(room)[0].tool_ops.map(o => o.tool), ["write_file", "write_file", "calculate", "roll_dice"]);
+});
+
+test("envelopes: only the sealer opens, once, and the contents are fixed", () => {
+	let {new_envelopes, ENVELOPE_LIMITS} = require("../src/utility_tools");
+	let envelopes = new_envelopes();
+	let run = (who, name, input) => run_utility_tool({name, input}, who, {envelopes});
+
+	let r = run("Sonnet", "seal_envelope", {label: "  my   number ", content: "337"});
+	assert.strictEqual(r.announce, "Sonnet sealed envelope #1: \"my number\".");
+	assert(!r.summary.includes("337") && !r.announce.includes("337"), "sealing reveals nothing");
+	assert(r.content.includes("open_envelope, number 1"));
+
+	assert.strictEqual(run("Opus", "open_envelope", {number: 1}).content, "Error: Envelope #1 is Sonnet's, and only they can open it.");
+	assert.strictEqual(run("Sonnet", "open_envelope", {number: 2}).is_error, true);
+	assert.strictEqual(run("Sonnet", "open_envelope", {number: "1"}).is_error, true);
+	r = run("Sonnet", "open_envelope", {number: 1});
+	assert.strictEqual(r.announce, "Sonnet opened envelope #1 (\"my number\"), which the room has kept unchanged since it was sealed. It contained: 337");
+	assert.strictEqual(run("Sonnet", "open_envelope", {number: 1}).content, "Error: Envelope #1 is already open.");
+
+	for (let bad of [{label: "", content: "x"}, {label: "x", content: ""}, {label: "x".repeat(101), content: "x"},
+		{label: "x", content: "y".repeat(2001)}, {label: 5, content: "x"}, {label: "x", content: {toString() { throw new Error("boom"); }}}]) {
+		assert.strictEqual(run("Opus", "seal_envelope", bad).is_error, true, JSON.stringify(bad).slice(0, 40));
+	}
+	for (let i = envelopes.list.length; i < ENVELOPE_LIMITS.count; i++) {
+		run("Opus", "seal_envelope", {label: "filler", content: "x"});
+	}
+	assert(run("Opus", "seal_envelope", {label: "one too many", content: "x"}).content.includes("at most 50"));
+	assert.strictEqual(run_utility_tool({name: "seal_envelope", input: {label: "x", content: "y"}}, "Opus").is_error, true, "no envelopes without a room");
+});
+
+test("envelopes in the room: sealed in private, opened in public, opened on leaving, shown to the host at close", async () => {
+	let backend = fake_backend((name, req, n) => {
+		if (name === "Sonnet" && n === 0) return file_step(tool("seal_envelope", {label: "my number", content: "337"}));
+		if (name === "Sonnet" && n === 1) return speak("Sealed. Guess away.");
+		if (name === "Haiku" && n === 0) return file_step(tool("seal_envelope", {label: "hidden role", content: "the spy"}));
+		if (name === "Haiku" && n === 1) return leave("I'll head off.");
+		if (name === "Sonnet" && n === 2) return file_step(tool("open_envelope", {number: 1}));
+		if (name === "Opus" && n === 0) return file_step(tool("seal_envelope", {label: "prediction", content: "rain tomorrow"}));
+		return speak(`${name} ${n}`);
+	});
+	let cfg = make_cfg({max_turns: 4, farewell_round: false, first_speaker: "Sonnet", transcript_dir: temp_dir()});
+	let room = new_room(cfg, backend, {template: "x", random: () => 0});
+	let files = require("../src/transcript").attach_transcript(room, cfg);
+	await room.run();
+
+	let views = backend.calls.map(c => ({name: c.name, text: c.req.messages.map(m => JSON.stringify(m.content)).join("\n")}));
+	let opus_views = views.filter(v => v.name === "Opus").map(v => v.text).join("\n");
+	assert(opus_views.includes("Sonnet sealed envelope #1: \\\"my number\\\"."), "Opus hears about the envelope");
+	let before_open = views.filter(v => v.name === "Opus")[0].text;
+	assert(!before_open.includes("337"), "but not what's in it");
+	let sonnet_after = views.filter(v => v.name === "Sonnet").pop().text;			// Sonnet's turn after Haiku left.
+	assert(sonnet_after.includes("Haiku is leaving, so the room has opened envelope #3 (\\\"hidden role\\\")"), "Haiku's secret opens as it leaves");
+	assert(sonnet_after.includes("It contained: the spy"));
+
+	let kinds = room.log.map(e => e.kind === "notice" ? e.text : (e.kind === "tool_op" ? `op:${e.summary.slice(0, 18)}` : e.kind));
+	assert(kinds.indexOf("Haiku has left the room.") > kinds.findIndex(k => k.startsWith("op:left with an env")), "opened before the departure notice");
+
+	let md = fs.readFileSync(files.md_path, "utf8");
+	let close_at = md.indexOf("The room is now closed.");
+	assert(md.indexOf("never opened envelope #2 (\"prediction\")") !== -1, "Opus's unopened envelope goes to the host");
+	assert(md.indexOf("rain tomorrow") > md.indexOf("sealed envelope #2") && md.indexOf("rain tomorrow") < close_at, "revealed only at the close");
+	assert(md.indexOf("sealed envelope #1 (\"my number\")") < md.indexOf("337"), "the host's transcript doesn't spoil it at sealing time");
+	assert(!views.some(v => v.name !== "Opus" && v.text.includes("rain tomorrow")), "and no other model ever sees the never-opened envelope");
 });
 
 test("config: the name 'shared' is reserved", () => {

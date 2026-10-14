@@ -15,7 +15,7 @@ const EventEmitter = require("events");
 const pricing = require("./pricing");
 const {build_system_prompt} = require("./prompt");
 const {new_storage, make_file_tools, FILE_TOOL_NAMES, run_file_tool, LIMITS} = require("./storage");
-const {UTILITY_TOOLS, UTILITY_TOOL_NAMES, run_utility_tool} = require("./utility_tools");
+const {UTILITY_TOOLS, UTILITY_TOOL_NAMES, run_utility_tool, new_envelopes, describe_opened} = require("./utility_tools");
 
 const TOOLS = [
 	{
@@ -66,6 +66,7 @@ function new_room(cfg, backend, opts = {}) {
 		cfg: cfg,
 		backend: backend,
 		shared_storage: shared,
+		envelopes: new_envelopes(),				// Sealed secrets for games; this session only.
 		random: opts.random || Math.random,		// Injectable for tests.
 
 		participants: cfg.participants.map(p => {
@@ -603,7 +604,7 @@ const room_prototype = {
 				let r;
 				try {
 					r = UTILITY_TOOL_NAMES.includes(t.name)
-						? run_utility_tool(t, p.name)
+						? run_utility_tool(t, p.name, {envelopes: this.envelopes})
 						: run_file_tool({private: p.storage, shared: this.shared_storage}, t, actor);
 				} catch (error) {						// These shouldn't throw, but a tool call must never end the session.
 					r = {content: "Error: the tool failed unexpectedly.", is_error: true, summary: `tool ${t.name} failed unexpectedly`};
@@ -662,6 +663,17 @@ const room_prototype = {
 		if (action === "leave") {
 			p.present = false;
 			this.floor_queue = this.floor_queue.filter(n => n !== p.name);
+
+			// A secret can't leave the game with its keeper: their sealed envelopes open for all.
+
+			for (let e of this.envelopes.unopened(p.name)) {
+				e.opened = true;
+				this.append({
+					kind: "tool_op", author: p.name, tool: "open_envelope", is_error: false,
+					summary: `left with an envelope still sealed, so the room opened ${describe_opened(e)}`,
+					announce: `${p.name} is leaving, so the room has opened ${describe_opened(e)}`,
+				});
+			}
 			this.notice(`${p.name} has left the room.`);
 		}
 	},
@@ -702,8 +714,20 @@ const room_prototype = {
 
 		if (!this.closed) {
 			this.apply_pending_host_messages();
+			this.reveal_sealed_to_host();
 			this.notice("The room is now closed.");
 			this.finish(reason);
+		}
+	},
+
+	// Envelopes nobody opened go into the host's transcript as the room closes. The models
+	// never see these entries (no announcement), since the room is ending anyway.
+
+	reveal_sealed_to_host: function() {
+		for (let e of this.envelopes.unopened()) {
+			e.opened = true;
+			this.append({kind: "tool_op", author: e.author, tool: "envelope", is_error: false, announce: "",
+				summary: `never opened ${describe_opened(e)}`});
 		}
 	},
 
@@ -791,6 +815,7 @@ const room_prototype = {
 		if (turn && turn.steps.length > 0) {
 			this.record_turn(turn.p, turn.steps);
 		}
+		this.reveal_sealed_to_host();
 		this.notice("The room was closed by the host.");
 		this.finish("quit");
 	},

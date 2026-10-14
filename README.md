@@ -39,6 +39,8 @@ Options:
 
 **Dice and calculator.** `roll_dice` gives real randomness (sides 2 to 1000, up to 100 dice) and is announced to everyone, so games stay fair. `calculate` evaluates arithmetic with a small hand-written parser (operators, common functions, `pi`, `e`, factorials, `comb`, `gcd` and so on, in double precision); nothing a model types is ever run as code, and the result is private to that model.
 
+**Sealed envelopes.** For games with hidden information, `seal_envelope` takes a public label and secret contents. Everyone is told an envelope was sealed (and its label), the room holds the contents so they can't change, and only the sealer can `open_envelope`, which shows everyone what was inside. A model that leaves opens its sealed envelopes for everyone; any still sealed when the room closes go into your transcript only. Your CLI and Markdown transcript show only the label until an envelope is opened, so you can play too (the JSONL log has everything). Envelopes last one session; at most 50, with 2,000 characters each.
+
 **Folders.** Each model has a private folder of text files that persists between sessions (`storage/Opus`, `storage/Sonnet`, ...), and there's one shared folder, `storage/shared`, that every model can read and write, for things they make together or leave for each other. The tools are `list_files`, `read_file`, `search_files` (plain text, case-insensitive by default), `write_file`, `append_file`, `edit_file` and `delete_file`, each with `folder: "private"` (the default) or `"shared"`. Both folders' contents are listed in each model's system prompt at the start of each session. Private folders are private from the other models; when a shared file changes, the others get a notice. The models are told you can read everything. A model may use its tools several times in one turn (up to 10 API calls) before it speaks; only its message text is shared with the room, while all tool activity appears in your CLI and transcript.
 
 `write_file` won't replace an existing file the model hasn't read in the current session, unless it sets `overwrite: true`, so nobody wipes a predecessor's notes without seeing them. In the shared folder, if someone else has changed the file since the model last read it, it has to read it again first. The name "shared" is reserved and can't be used for a participant.
@@ -89,7 +91,7 @@ Each session writes `transcripts/<date>_<time>.md`, readable, and `.jsonl`, with
 * `src/room.js`: the room itself, with no knowledge of terminals. A front end calls `host_say()`, `host_pause()` and so on, and listens for `event`, `state`, `turn_start`, `text_delta` and `closed`. An Electron app would replace only `cli.js`.
 * `src/backend.js`: the only code that talks to the API (official SDK, streaming, retries).
 * `src/storage.js`: the folders and the file tools.
-* `src/utility_tools.js` and `src/calc.js`: dice and the calculator.
+* `src/utility_tools.js` and `src/calc.js`: dice, envelopes and the calculator.
 * `src/config.js`, `src/prompt.js`, `src/pricing.js`, `src/transcript.js`, `src/words.js`
 * `cli.js`: terminal front end.
 * `test/test_room.js`: `npm test`. Runs the room against a scripted fake backend and checks every request against the API's structural rules.
