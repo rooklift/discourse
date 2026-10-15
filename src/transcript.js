@@ -108,6 +108,10 @@ function markdown_for(entry, cfg) {
 		return `> *Error${entry.author ? ` (${entry.author})` : ""}: ${entry.text}*\n\n`;
 	}
 
+	if (entry.kind === "warning") {
+		return `> *Warning: ${entry.text}*\n\n`;
+	}
+
 	if (entry.kind !== "turn") {
 		return "";
 	}

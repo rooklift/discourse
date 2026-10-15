@@ -160,6 +160,13 @@ const room_prototype = {
 		return this.append({kind: "notice", text});
 	},
 
+	// Something the host should know about how the session is running, such as a backend turning
+	// off strict tool schemas. Logged (so the transcript has it) but never shown to the models.
+
+	warn: function(text) {
+		return this.append({kind: "warning", text: String(text)});
+	},
+
 	get_participant: function(name) {
 		let lower = String(name).toLowerCase();
 		return this.participants.find(p => p.name.toLowerCase() === lower) || null;
@@ -399,7 +406,7 @@ const room_prototype = {
 		if (entry.kind === "tool_op" && entry.announce && entry.author !== me.name) {
 			return `<notice>${entry.announce}</notice>`;
 		}
-		return "";								// Errors and private tool use stay invisible to the models.
+		return "";								// Errors, warnings and private tool use stay invisible to the models.
 	},
 
 	build_view: function(me) {

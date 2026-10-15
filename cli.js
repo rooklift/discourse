@@ -167,13 +167,16 @@ async function main() {
 		process.exit(1);
 	}
 
-	let on_warning = (message) => print(paint(`(Warning: ${message})`, 33));
+	// Backend warnings go into the room's log, so they reach the transcript as well as the screen.
+
+	let room = null;
+	let on_warning = (message) => room ? room.warn(message) : print(paint(`(Warning: ${message})`, 33));
 	let makers = {anthropic: new_anthropic_backend, google: new_google_backend, openai: new_openai_backend};
 	let backends = {};
 	for (let [provider, key] of Object.entries(api_keys)) {
 		backends[provider] = makers[provider](key, {on_warning});
 	}
-	let room = new_room(cfg, new_router(backends));
+	room = new_room(cfg, new_router(backends));
 	let files = attach_transcript(room, cfg);
 
 	let color_of = Object.create(null);
@@ -197,6 +200,8 @@ async function main() {
 			print(paint(`(${entry.author} ${entry.summary})`, entry.is_error ? 31 : 2));
 		} else if (entry.kind === "error") {
 			print(paint(`Error${entry.author ? ` (${entry.author})` : ""}: ${entry.text}`, 31));
+		} else if (entry.kind === "warning") {
+			print(paint(`(Warning: ${entry.text})`, 33));
 		} else if (entry.kind === "turn") {
 			for (let t of entry.thinking) {
 				print(dim(`[${entry.author} thinking] ${t}`));

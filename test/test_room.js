@@ -2054,6 +2054,28 @@ test("pricing and config: OpenAI models", () => {
 	assert.deepStrictEqual(read_api_keys(cfg), {openai: "okey"});
 });
 
+test("backend warnings reach the log and transcript, but never the models", async () => {
+	let room;
+	let gem = fake_google((body, n) => n === 0
+		? json_response({error: {code: 400, message: "tool_choice 'validated' is not supported"}}, 400)
+		: json_response(interaction([{type: "model_output", content: [{type: "text", text: `Gemini ${n}, @Opus`}]}])));
+	gem.backend.on_warning = (m) => room.warn(m);
+	let claude = fake_backend((name, req, n) => speak(`${name} ${n}, @Gemini`));
+	let cfg = gemini_cfg({first_speaker: "Gemini", opening_message: "Hello", max_turns: 3, farewell_round: false,
+		system_prompt: path.join(__dirname, "..", "system", "standard.txt"), transcript_dir: temp_dir()});
+	room = new_room(cfg, new_router({anthropic: claude, google: gem.backend}));
+	let files = require("../src/transcript").attach_transcript(room, cfg);
+	await room.run();
+
+	let warnings = room.log.filter(e => e.kind === "warning");
+	assert.strictEqual(warnings.length, 1);
+	assert(warnings[0].text.includes("schema-checked tool calls"));
+	assert(fs.readFileSync(files.md_path, "utf8").includes("> *Warning: The Gemini API rejected schema-checked tool calls"));
+	assert(fs.readFileSync(files.jsonl_path, "utf8").includes("\"kind\":\"warning\""));
+	let seen = JSON.stringify(claude.calls) + JSON.stringify(gem.bodies.slice(1));
+	assert(!seen.includes("schema-checked"), "no model is told about it");
+});
+
 // ------------------------------------------------------------------------------------------------
 
 (async () => {
