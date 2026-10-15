@@ -1301,10 +1301,10 @@ function bad_request(message) {
 
 function fake_api_backend(respond) {
 	let sdk = require("@anthropic-ai/sdk");
-	let {new_backend} = require("../src/backend");
+	let {new_anthropic_backend} = require("../src/backend_anthropic");
 	let warnings = [];
 	let bodies = [];
-	let backend = new_backend("k", {on_warning: (m) => warnings.push(m)});
+	let backend = new_anthropic_backend("k", {on_warning: (m) => warnings.push(m)});
 	backend.client = new sdk.Anthropic({apiKey: "k", maxRetries: 0, fetch: async (url, init) => {
 		let body = JSON.parse(init.body);
 		bodies.push(body);
@@ -1616,7 +1616,7 @@ test("the system prompt describes the folder and lists its contents at the start
 // ------------------------------------------------------------------------------------------------
 // Gemini, through the Interactions API.
 
-const {new_google_backend, to_steps, to_message} = require("../src/google_backend");
+const {new_google_backend, to_steps, to_message} = require("../src/backend_google");
 const {new_router} = require("../src/router");
 
 function interaction(steps, opts = {}) {
@@ -1871,7 +1871,7 @@ test("router: each participant's requests go to its provider's backend", async (
 // ------------------------------------------------------------------------------------------------
 // OpenAI, through the Responses API.
 
-const openai_backend = require("../src/openai_backend");
+const backend_openai = require("../src/backend_openai");
 
 function oai_response(output, opts = {}) {
 	return {
@@ -1888,7 +1888,7 @@ function oai_response(output, opts = {}) {
 function fake_openai(respond, opts = {}) {
 	let bodies = [];
 	let warnings = [];
-	let backend = openai_backend.new_openai_backend("okey", {
+	let backend = backend_openai.new_openai_backend("okey", {
 		on_warning: (m) => warnings.push(m),
 		sleep: async () => {},
 		fetch: async (url, init) => {
@@ -1913,7 +1913,7 @@ test("openai: room messages become Responses input items, and stranded reasoning
 	let reasoning = {type: "reasoning", id: "rs_1", summary: [], encrypted_content: "ENC1"};
 	let call = {type: "function_call", id: "fc_1", call_id: "call_1", name: "calculate", arguments: "{\"expression\":\"2+2\"}", status: "completed"};
 	let lonely = {type: "reasoning", id: "rs_2", summary: [], encrypted_content: "ENC2"};
-	let items = openai_backend.to_input([
+	let items = backend_openai.to_input([
 		{role: "user", content: [
 			{type: "text", text: "look"},
 			{type: "image", source: {type: "base64", media_type: "image/png", data: "AAAA"}},
@@ -1941,7 +1941,7 @@ test("openai: room messages become Responses input items, and stranded reasoning
 });
 
 test("openai: replies become Anthropic-shaped messages, with usage converted and strict nulls dropped", () => {
-	let m = openai_backend.to_message(oai_response([
+	let m = backend_openai.to_message(oai_response([
 		{type: "reasoning", id: "rs_1", summary: [{type: "summary_text", text: "Thinking it over."}], encrypted_content: "E"},
 		{type: "message", id: "msg_1", role: "assistant", status: "completed", content: [{type: "output_text", text: "Hello.", annotations: []}]},
 		{type: "function_call", id: "fc_1", call_id: "call_9", name: "write_file", arguments: "{\"filename\":\"a.md\",\"content\":\"x\",\"folder\":null,\"overwrite\":null}"},
@@ -1953,18 +1953,18 @@ test("openai: replies become Anthropic-shaped messages, with usage converted and
 	assert.strictEqual(m.content[2].id, "call_9", "the call_id is what tool results refer to");
 	assert.deepStrictEqual(m.usage, {input_tokens: 100, cache_read_input_tokens: 700, cache_creation_input_tokens: 200, output_tokens: 90});
 
-	assert.deepStrictEqual(openai_backend.to_message(oai_response([{type: "function_call", call_id: "c", name: "read_file", arguments: "{not json"}])).content[0].input, {});
-	assert.strictEqual(openai_backend.to_message(oai_response([{type: "message", content: [{type: "output_text", text: "Cut"}]}], {status: "incomplete", incomplete_details: {reason: "max_output_tokens"}})).stop_reason, "max_tokens");
-	let refusal = openai_backend.to_message(oai_response([{type: "message", content: [{type: "refusal", refusal: "I can't help with that."}]}]));
+	assert.deepStrictEqual(backend_openai.to_message(oai_response([{type: "function_call", call_id: "c", name: "read_file", arguments: "{not json"}])).content[0].input, {});
+	assert.strictEqual(backend_openai.to_message(oai_response([{type: "message", content: [{type: "output_text", text: "Cut"}]}], {status: "incomplete", incomplete_details: {reason: "max_output_tokens"}})).stop_reason, "max_tokens");
+	let refusal = backend_openai.to_message(oai_response([{type: "message", content: [{type: "refusal", refusal: "I can't help with that."}]}]));
 	assert.strictEqual(refusal.stop_reason, "refusal");
 	assert.strictEqual(refusal.content[0].text, "I can't help with that.");
-	assert.throws(() => openai_backend.to_message({status: "failed", error: {message: "server_error"}}), /failed: server_error/);
+	assert.throws(() => backend_openai.to_message({status: "failed", error: {message: "server_error"}}), /failed: server_error/);
 });
 
 test("openai: strict tools send optional fields as nullable and required; others go non-strict", () => {
 	let {make_file_tools} = require("../src/storage");
 	let write_file = make_file_tools(true).find(t => t.name === "write_file");
-	let sent = openai_backend.to_function_tool(write_file, true);
+	let sent = backend_openai.to_function_tool(write_file, true);
 	assert.strictEqual(sent.strict, true);
 	assert.strictEqual(sent.parameters.additionalProperties, false);
 	assert.deepStrictEqual(sent.parameters.required.slice().sort(), Object.keys(write_file.input_schema.properties).sort());
@@ -1973,9 +1973,9 @@ test("openai: strict tools send optional fields as nullable and required; others
 	assert(sent.parameters.properties.folder.enum.includes(null));
 	assert.deepStrictEqual(write_file.input_schema.properties.folder.type, "string", "the room's own tool is untouched");
 
-	let pass_tool = openai_backend.to_function_tool(require("../src/room").TOOLS[0], true);
+	let pass_tool = backend_openai.to_function_tool(require("../src/room").TOOLS[0], true);
 	assert.strictEqual(pass_tool.strict, false);
-	let loose = openai_backend.to_function_tool(write_file, false);
+	let loose = backend_openai.to_function_tool(write_file, false);
 	assert.strictEqual(loose.strict, false);
 	assert.strictEqual(loose.parameters.additionalProperties, undefined);
 	assert.deepStrictEqual(loose.parameters.properties.folder.type, "string");

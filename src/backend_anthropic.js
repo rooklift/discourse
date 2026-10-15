@@ -8,7 +8,7 @@ const sdk = require("@anthropic-ai/sdk");
 // opts.on_warning(message) is told about anything the host should know, such as strict tool
 // use being turned off.
 
-function new_backend(api_key, opts = {}) {
+function new_anthropic_backend(api_key, opts = {}) {
 	let backend = Object.create(backend_prototype);
 	backend.client = new sdk.Anthropic({
 		apiKey: api_key,
@@ -99,4 +99,4 @@ const backend_prototype = {
 	},
 };
 
-module.exports = {new_backend};
+module.exports = {new_anthropic_backend};

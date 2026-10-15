@@ -20,9 +20,9 @@ const DEFAULT_RANDOM_WORDS = 5;
 const path = require("path");
 const readline = require("readline");
 const {load_config, read_api_keys} = require("./src/config");
-const {new_backend} = require("./src/backend");
-const {new_google_backend} = require("./src/google_backend");
-const {new_openai_backend} = require("./src/openai_backend");
+const {new_anthropic_backend} = require("./src/backend_anthropic");
+const {new_google_backend} = require("./src/backend_google");
+const {new_openai_backend} = require("./src/backend_openai");
 const {new_router} = require("./src/router");
 const {new_room, MAX_IMAGES} = require("./src/room");
 const {attach_transcript} = require("./src/transcript");
@@ -168,7 +168,7 @@ async function main() {
 	}
 
 	let on_warning = (message) => print(paint(`(Warning: ${message})`, 33));
-	let makers = {anthropic: new_backend, google: new_google_backend, openai: new_openai_backend};
+	let makers = {anthropic: new_anthropic_backend, google: new_google_backend, openai: new_openai_backend};
 	let backends = {};
 	for (let [provider, key] of Object.entries(api_keys)) {
 		backends[provider] = makers[provider](key, {on_warning});

@@ -81,7 +81,7 @@ What these checks guard against is the models, which can't create links, plus ac
 }
 ```
 
-`effort` means the thinking level for Gemini (`minimal` to `high`) and the reasoning effort for OpenAI (`none` to `max`), or `""` for the model's default; not every model takes every value, and the API says so if one doesn't. These models see the room exactly as a Claude model does, with the same tools, folders and system prompt; `src/google_backend.js` and `src/openai_backend.js` translate each request and reply. Like the Claude side, both are stateless (`store: false`): every request carries that model's whole view of the conversation, nothing is stored with the company to build on later, and each model's reasoning (Gemini's signed thought steps, OpenAI's encrypted reasoning items) is sent back exactly as received, and never to anyone else. Replies aren't streamed.
+`effort` means the thinking level for Gemini (`minimal` to `high`) and the reasoning effort for OpenAI (`none` to `max`), or `""` for the model's default; not every model takes every value, and the API says so if one doesn't. These models see the room exactly as a Claude model does, with the same tools, folders and system prompt; `src/backend_google.js` and `src/backend_openai.js` translate each request and reply. Like the Claude side, both are stateless (`store: false`): every request carries that model's whole view of the conversation, nothing is stored with the company to build on later, and each model's reasoning (Gemini's signed thought steps, OpenAI's encrypted reasoning items) is sent back exactly as received, and never to anyone else. Replies aren't streamed.
 
 Tools with required fields get each API's form of strict tool use, with the same fallback if it's refused: Gemini's `tool_choice: "validated"`, and OpenAI's `strict`, for which optional fields are sent as nullable (OpenAI requires every field be listed as required) and any nulls are dropped before the room sees the call. Caching is automatic on both, with no control over it, so how much a session saves varies; requests from each OpenAI model carry a `prompt_cache_key` to help.
 
@@ -127,8 +127,8 @@ Each session writes `transcripts/<date>_<time>.md`, readable, and `.jsonl`, with
 ## Code layout
 
 * `src/room.js`: the room itself, with no knowledge of terminals. A front end calls `host_say()`, `host_pause()` and so on, and listens for `event`, `state`, `turn_start`, `text_delta` and `closed`. An Electron app would replace only `cli.js`.
-* `src/backend.js`: talks to the Claude API (official SDK, streaming, retries).
-* `src/google_backend.js` and `src/openai_backend.js`: talk to the Gemini Interactions API and the OpenAI Responses API, translating to and from the Messages API's shapes the room uses.
+* `src/backend_anthropic.js`: talks to the Claude API (official SDK, streaming, retries).
+* `src/backend_google.js` and `src/backend_openai.js`: talk to the Gemini Interactions API and the OpenAI Responses API, translating to and from the Messages API's shapes the room uses.
 * `src/http.js`: the JSON POSTs and retries those two share (plain `fetch`).
 * `src/router.js`: sends each participant's requests to the right backend.
 * `src/storage.js`: the folders and the file tools.
