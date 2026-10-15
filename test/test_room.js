@@ -1096,17 +1096,17 @@ test("in the room: shared changes and dice are announced to others; private tool
 	assert.deepStrictEqual(turns(room)[0].tool_ops.map(o => o.tool), ["write_file", "write_file", "calculate", "roll_dice"]);
 });
 
-test("envelopes: anyone opens unless private, once, and the contents are fixed", () => {
+test("envelopes: anyone opens unless locked, once, and the contents are fixed", () => {
 	let {new_envelopes, ENVELOPE_LIMITS} = require("../src/utility_tools");
 	let envelopes = new_envelopes();
 	let run = (who, name, input) => run_utility_tool({name, input}, who, {envelopes});
 
-	let r = run("Sonnet", "seal_envelope", {label: "  my   number ", content: "337", private: true});
-	assert.strictEqual(r.announce, "Sonnet sealed private envelope #1: \"my number\". Only Sonnet can open it.");
+	let r = run("Sonnet", "seal_envelope", {label: "  my   number ", content: "337", locked: true});
+	assert.strictEqual(r.announce, "Sonnet sealed locked envelope #1: \"my number\". Only Sonnet can open it.");
 	assert(!r.summary.includes("337") && !r.announce.includes("337"), "sealing reveals nothing");
-	assert(r.content.includes("Only you can open it, with open_envelope, number 1"));
+	assert(r.content.includes("It's locked, so only you can open it, with open_envelope, number 1"));
 
-	assert.strictEqual(run("Opus", "open_envelope", {numbers: [1]}).content, "Error: Envelope #1 is Sonnet's private envelope, and only they can open it.");
+	assert.strictEqual(run("Opus", "open_envelope", {numbers: [1]}).content, "Error: Envelope #1 is locked: only Sonnet can open it.");
 	assert.strictEqual(run("Sonnet", "open_envelope", {number: 2}).is_error, true);
 	assert.strictEqual(run("Sonnet", "open_envelope", {number: "1"}).is_error, true);
 	r = run("Sonnet", "open_envelope", {number: 1});
@@ -1136,7 +1136,7 @@ test("envelopes in the room: sealed in private, opened in public, opened on leav
 	let backend = fake_backend((name, req, n) => {
 		if (name === "Sonnet" && n === 0) return file_step(tool("seal_envelope", {label: "my number", content: "337"}));
 		if (name === "Sonnet" && n === 1) return speak("Sealed. Guess away.");
-		if (name === "Haiku" && n === 0) return file_step(tool("seal_envelope", {label: "hidden role", content: "the spy", private: true}), tool("seal_envelope", {label: "my bid", content: "6"}));
+		if (name === "Haiku" && n === 0) return file_step(tool("seal_envelope", {label: "hidden role", content: "the spy", locked: true}), tool("seal_envelope", {label: "my bid", content: "6"}));
 		if (name === "Haiku" && n === 1) return leave("I'll head off.");
 		if (name === "Sonnet" && n === 2) return file_step(tool("open_envelope", {number: 1}));
 		if (name === "Opus" && n === 0) return file_step(tool("seal_envelope", {label: "prediction", content: "rain tomorrow"}));
@@ -2304,11 +2304,11 @@ test("open_envelope: several at once, with any that can't be opened reported", (
 	let run = (who, name, input) => run_utility_tool({name, input}, who, {envelopes});
 	run("Sol", "seal_envelope", {label: "a", content: "one"});
 	run("Sol", "seal_envelope", {label: "b", content: "two"});
-	run("Luna", "seal_envelope", {label: "c", content: "three", private: true});
+	run("Luna", "seal_envelope", {label: "c", content: "three", locked: true});
 	let r = run("Sol", "open_envelope", {numbers: [1, 2, 3, 1]});
 	assert(!r.is_error);
 	assert(r.content.includes("envelope #1 (\"a\")") && r.content.includes("(\"b\"): two"));
-	assert(r.content.includes("Not opened: Envelope #3 is Luna's private envelope, and only they can open it."));
+	assert(r.content.includes("Not opened: Envelope #3 is locked: only Luna can open it."));
 	assert(r.announce.startsWith("Sol opened 2 envelopes: envelope #1"));
 	assert.strictEqual(envelopes.unopened("Luna").length, 1);
 	assert(run("Sol", "open_envelope", {numbers: [1]}).content.includes("already open"));
