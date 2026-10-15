@@ -65,12 +65,12 @@ function attach_transcript(room, cfg) {
 	room.on("closed", () => {
 		let lines = room.participants.map(p => {
 			let u = p.usage;
-			return `- ${p.name}: ${p.turns} turns, $${p.cost.toFixed(4)} (input ${u.input}, cache read ${u.cache_read}, cache write ${u.cache_write}, output ${u.output})`;
+			return `- ${p.name}: ${p.turns} turns, $${p.cost.toFixed(2)} (input ${u.input}, cache read ${u.cache_read}, cache write ${u.cache_write}, output ${u.output})`;
 		});
-		let total = `$${room.total_cost.toFixed(4)}${room.cost_known ? "" : " (incomplete: some prices unknown)"}`;
+		let total = `$${room.total_cost.toFixed(2)}${room.cost_known ? "" : " (incomplete: some prices unknown)"}`;
 		let groups = room.cost_by_provider();
 		let split = groups.length > 1
-			? ` (${groups.map(g => `${g.company} $${g.cost.toFixed(4)}${g.known ? "" : " incomplete"}`).join(", ")})`
+			? ` (${groups.map(g => `${g.company} $${g.cost.toFixed(2)}${g.known ? "" : " incomplete"}`).join(", ")})`
 			: "";
 		write_md(`---\n\nTotal cost: ${total}${split}\n\n${lines.join("\n")}\n`);
 		write_json({kind: "summary", total_cost: room.total_cost, cost_known: room.cost_known, providers: groups,

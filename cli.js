@@ -74,10 +74,10 @@ function print(s) {
 }
 
 function money(n) {
-	return "$" + n.toFixed(4);
+	return "$" + n.toFixed(2);
 }
 
-// " (Anthropic $0.4732, Google $0.2066)" when more than one provider is in the room, else "".
+// " (Anthropic $0.47, Google $0.21)" when more than one provider is in the room, else "".
 
 function provider_split(room) {
 	let groups = room.cost_by_provider();
