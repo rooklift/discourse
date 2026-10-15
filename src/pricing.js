@@ -1,8 +1,8 @@
 "use strict";
 
 // Prices in dollars per million tokens, from https://platform.claude.com/docs/en/about-claude/pricing
-// and https://ai.google.dev/gemini-api/docs/pricing (both checked October 2026; Gemini prices are
-// the standard paid tier). A participant can override these with a "prices" object in config.json.
+// https://ai.google.dev/gemini-api/docs/pricing and https://developers.openai.com/api/docs/pricing
+// (all checked October 2026; Gemini and OpenAI prices are the standard tier). A participant can override these with a "prices" object in config.json.
 //
 // Each entry is a list of tiers. A request uses the first tier whose up_to is at least the
 // request's total prompt length (uncached input + cache reads + cache writes).
@@ -45,10 +45,21 @@ const PRICES = {
 	"gemini-3.1-pro-preview": [gemini(2, 12, 0.20, 200000), gemini(4, 18, 0.40)],
 	"gemini-2.5-pro": [gemini(1.25, 10, 0.125, 200000), gemini(2.50, 15, 0.25)],
 	"gemini-2.5-flash": [gemini(0.30, 2.50, 0.03)],
+
+	// OpenAI charges for cache writes too (1.25x input), and above 272K prompt tokens the whole
+	// request is priced at 2x input and cache rates and 1.5x output.
+
+	"gpt-6-astra": [openai(10, 1, 12.5, 50, 272000), openai(20, 2, 25, 75)],
+	"gpt-6.1-sol": [openai(2, 0.10, 2.5, 10, 272000), openai(4, 0.20, 5, 15)],
+	"gpt-6-luna": [openai(0.10, 0.01, 0.125, 0.50, 272000), openai(0.20, 0.02, 0.25, 0.75)],
 };
 
 function gemini(input, output, cache_read, up_to = Infinity) {
 	return {up_to, input, cache_write_5m: input, cache_write_1h: input, cache_read, output};
+}
+
+function openai(input, cache_read, cache_write, output, up_to = Infinity) {
+	return {up_to, input, cache_write_5m: cache_write, cache_write_1h: cache_write, cache_read, output};
 }
 
 const PRICE_FIELDS = ["input", "cache_write_5m", "cache_write_1h", "cache_read", "output"];

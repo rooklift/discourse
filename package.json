@@ -1,7 +1,7 @@
 {
 	"name": "discourse",
 	"version": "0.1.0",
-	"description": "A chat room where several AI models (Claude and Gemini) can talk with each other, and with you.",
+	"description": "A chat room where several AI models (Claude, Gemini and OpenAI) can talk with each other, and with you.",
 	"main": "cli.js",
 	"scripts": {
 		"start": "node cli.js",

@@ -8,6 +8,7 @@ const pricing = require("./pricing");
 const DEFAULTS = {
 	anthropic_api_key_file: "",		// Path to a file containing only your Anthropic API key. Keep it outside the repo.
 	google_api_key_file: "",		// The same for a Gemini API key, if any participant is a Gemini model.
+	openai_api_key_file: "",		// The same for an OpenAI API key, if any participant is an OpenAI model.
 	host_name: "Host",				// What the models call you.
 	host_present: true,				// If false, the room runs unattended and closes when it goes quiet.
 	system_prompt: "./system/standard.txt",
@@ -27,8 +28,8 @@ const DEFAULTS = {
 
 const PARTICIPANT_DEFAULTS = {
 	name: "",						// Required. Short name used in the room, e.g. "Opus". Used for @mentions.
-	model: "",						// Required. API model ID, e.g. "claude-opus-5-5" or "gemini-3.8-flash".
-	provider: "",					// "anthropic" or "google". Worked out from the model ID if blank.
+	model: "",						// Required. API model ID, e.g. "claude-opus-5-5", "gemini-3.8-flash" or "gpt-6.1-sol".
+	provider: "",					// "anthropic", "google" or "openai". Worked out from the model ID if blank.
 	full_name: "",					// Shown to the other models, e.g. "Claude Opus 5.5". Defaults to the model ID.
 	company: "",					// Shown to the other models. Defaults to the provider's company.
 	max_tokens: 16000,				// Hard limit on thinking + reply, per turn. (Gemini models allow up to 65,536.)
@@ -37,15 +38,23 @@ const PARTICIPANT_DEFAULTS = {
 };
 
 // Per provider: what "effort" may be set to, the company behind it, and the config key for its
-// API key file. For Gemini models, effort is the thinking level.
+// API key file. For Gemini models, effort is the thinking level; for OpenAI, the reasoning effort.
+// Not every model takes every value: the API says so if one doesn't.
 
 const PROVIDERS = {
 	anthropic: {company: "Anthropic", key_file: "anthropic_api_key_file", efforts: ["", "low", "medium", "high", "xhigh", "max"]},
 	google: {company: "Google", key_file: "google_api_key_file", efforts: ["", "minimal", "low", "medium", "high"]},
+	openai: {company: "OpenAI", key_file: "openai_api_key_file", efforts: ["", "none", "minimal", "low", "medium", "high", "xhigh", "max"]},
 };
 
 function provider_for(model) {
-	return /^gemini-/i.test(model) ? "google" : "anthropic";
+	if (/^gemini-/i.test(model)) {
+		return "google";
+	}
+	if (/^(gpt-|o\d|chatgpt-|chat-latest)/i.test(model)) {
+		return "openai";
+	}
+	return "anthropic";
 }
 
 function expand_home(p) {
@@ -90,8 +99,9 @@ function load_config(config_path) {
 	// program itself, so a config kept elsewhere still finds the bundled prompt and word list.
 
 	let app_dir = path.resolve(__dirname, "..");
-	for (let key of ["anthropic_api_key_file", "google_api_key_file", "system_prompt", "transcript_dir", "word_list", "storage_dir"]) {
-		if (["anthropic_api_key_file", "google_api_key_file", "storage_dir"].includes(key) && !cfg[key]) {
+	let key_files = Object.values(PROVIDERS).map(pr => pr.key_file);
+	for (let key of key_files.concat(["system_prompt", "transcript_dir", "word_list", "storage_dir"])) {
+		if ((key_files.includes(key) || key === "storage_dir") && !cfg[key]) {
 			continue;							// Empty: not used (or, for storage, turned off).
 		}
 		cfg[key] = resolve_path(cfg[key], Object.hasOwn(raw, key) ? base_dir : app_dir);

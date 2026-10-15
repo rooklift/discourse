@@ -15,32 +15,26 @@
 // backend returns carries the step it came from as "native", and on the way back any block
 // with a "native" step is sent as that step, untouched.
 //
-// It uses fetch directly rather than Google's SDK: the API is one JSON POST, and the SDK brings
-// auth libraries, protobufs and websockets along with it.
+// It uses fetch directly (src/http.js) rather than Google's SDK: the API is one JSON POST, and
+// the SDK brings auth libraries, protobufs and websockets along with it.
+
+const {new_poster, APIError, is_abort_error, system_text, tool_result_text} = require("./http");
 
 const ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/interactions";
-const RETRY_STATUSES = [408, 429, 500, 502, 503, 504];
-const MAX_RETRY_DELAY = 30000;
-
-class GoogleAPIError extends Error {
-	constructor(status, message, body) {
-		super(`Google API error ${status}: ${message}`);
-		this.name = "GoogleAPIError";
-		this.status = status;
-		this.body = body;
-	}
-}
 
 // opts: {max_retries, on_warning, fetch, sleep, endpoint}. fetch and sleep are for tests.
 
 function new_google_backend(api_key, opts = {}) {
 	let backend = Object.create(google_prototype);
-	backend.api_key = api_key;
-	backend.max_retries = opts.max_retries ?? 4;
 	backend.on_warning = typeof opts.on_warning === "function" ? opts.on_warning : () => {};
-	backend.fetch = opts.fetch || ((...args) => fetch(...args));
-	backend.sleep = opts.sleep || abortable_sleep;
-	backend.endpoint = opts.endpoint || ENDPOINT;
+	backend.post = new_poster({
+		api_name: "Gemini",
+		url: opts.endpoint || ENDPOINT,
+		headers: {"x-goog-api-key": api_key},
+		max_retries: opts.max_retries,
+		fetch: opts.fetch,
+		sleep: opts.sleep,
+	});
 	backend.validated_ok = true;			// Becomes false if the API ever rejects tool_choice "validated".
 	return backend;
 }
@@ -110,64 +104,11 @@ const google_prototype = {
 		return body;
 	},
 
-	// One POST, retried with backoff on rate limits, server errors and dropped connections.
-
-	post: async function(body, signal) {
-		for (let attempt = 0; ; attempt++) {
-			let response;
-			try {
-				response = await this.fetch(this.endpoint, {
-					method: "POST",
-					headers: {"content-type": "application/json", "x-goog-api-key": this.api_key},
-					body: JSON.stringify(body),
-					signal: signal,
-				});
-			} catch (error) {
-				if (this.is_abort_error(error)) {
-					throw error;
-				}
-				if (attempt >= this.max_retries) {
-					let cause = error?.cause?.message || error?.cause?.code;
-					throw new Error(`Couldn't reach the Gemini API: ${error.message}${cause ? ` (${cause})` : ""}`);
-				}
-				await this.sleep(retry_delay(attempt, null), signal);
-				continue;
-			}
-
-			if (response.ok) {
-				return await response.json();
-			}
-
-			let text = await response.text().catch(() => "");
-			if (RETRY_STATUSES.includes(response.status) && attempt < this.max_retries) {
-				await this.sleep(retry_delay(attempt, response.headers.get("retry-after")), signal);
-				continue;
-			}
-			let parsed = null;
-			try {
-				parsed = JSON.parse(text);
-			} catch (error) {
-				// Not JSON; use the raw text.
-			}
-			let message = parsed?.error?.message || text.slice(0, 500) || response.statusText || "request failed";
-			throw new GoogleAPIError(response.status, message, parsed);
-		}
-	},
-
-	is_abort_error: function(error) {
-		return error?.name === "AbortError";
-	},
+	is_abort_error: is_abort_error,
 };
 
 // ------------------------------------------------------------------------------------------------
 // Requests: Anthropic-style messages into Interactions steps.
-
-function system_text(system) {
-	if (Array.isArray(system)) {
-		return system.filter(b => b.type === "text").map(b => b.text).join("\n\n");
-	}
-	return String(system ?? "");
-}
 
 // additionalProperties is dropped: it only matters to Anthropic's strict mode, and Gemini's older
 // schema format rejected it. A tool that takes nothing (pass) gets no parameters at all, since
@@ -236,16 +177,6 @@ function to_steps(messages) {
 	}
 
 	return steps;
-}
-
-function tool_result_text(content) {
-	if (typeof content === "string") {
-		return content;
-	}
-	if (Array.isArray(content)) {
-		return content.filter(b => b.type === "text").map(b => b.text).join("\n");
-	}
-	return String(content ?? "");
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -319,39 +250,7 @@ function to_usage(u) {
 // ------------------------------------------------------------------------------------------------
 
 function is_validated_error(error) {
-	return error instanceof GoogleAPIError && error.status === 400 && /tool_choice|validated/i.test(error.message);
+	return error instanceof APIError && error.status === 400 && /tool_choice|validated/i.test(error.message);
 }
 
-function retry_delay(attempt, retry_after) {
-	let seconds = Number(retry_after);
-	if (retry_after && Number.isFinite(seconds) && seconds >= 0) {
-		return Math.min(seconds * 1000, MAX_RETRY_DELAY);
-	}
-	return Math.min(1000 * 2 ** attempt * (0.75 + Math.random() * 0.5), MAX_RETRY_DELAY);
-}
-
-function abortable_sleep(ms, signal) {
-	return new Promise((resolve, reject) => {
-		if (signal?.aborted) {
-			reject(abort_error());
-			return;
-		}
-		let timer = setTimeout(() => {
-			signal?.removeEventListener("abort", on_abort);
-			resolve();
-		}, ms);
-		let on_abort = () => {
-			clearTimeout(timer);
-			reject(abort_error());
-		};
-		signal?.addEventListener("abort", on_abort, {once: true});
-	});
-}
-
-function abort_error() {
-	let error = new Error("The request was aborted.");
-	error.name = "AbortError";
-	return error;
-}
-
-module.exports = {new_google_backend, GoogleAPIError, to_steps, to_message, to_usage};
+module.exports = {new_google_backend, to_steps, to_message, to_usage};

@@ -1787,7 +1787,7 @@ test("gemini: rate limits and server errors are retried, then a 400 is reported"
 	assert.strictEqual(g.sleeps[0], 2000, "Retry-After is honoured");
 
 	let bad = fake_google(() => json_response({error: {code: 400, message: "input[3]: bad step"}}, 400), {validate: false});
-	await assert.rejects(bad.backend.send(backend_request([])), /Google API error 400: input\[3\]: bad step/);
+	await assert.rejects(bad.backend.send(backend_request([])), /Gemini API error 400: input\[3\]: bad step/);
 	assert.strictEqual(bad.bodies.length, 1, "a 400 isn't retried");
 });
 
@@ -1837,7 +1837,7 @@ test("config: providers, key files, efforts and companies per participant", () =
 	assert.throws(() => load_config(write({google_api_key_file: "g.txt", participants: [opus, gem]})), /Opus is a model from Anthropic, so the config needs "anthropic_api_key_file"/);
 	assert.throws(() => load_config(write({anthropic_api_key_file: "a.txt", google_api_key_file: "g.txt", participants: [Object.assign({}, opus, {effort: "minimal"}), gem]})), /effort must be one of/);
 	assert.throws(() => load_config(write({anthropic_api_key_file: "a.txt", google_api_key_file: "g.txt", participants: [opus, Object.assign({}, gem, {effort: "max"})]})), /effort must be one of/);
-	assert.throws(() => load_config(write({anthropic_api_key_file: "a.txt", participants: [opus, {name: "X", model: "claude-haiku-5-5", provider: "openai"}]})), /provider must be one of/);
+	assert.throws(() => load_config(write({anthropic_api_key_file: "a.txt", participants: [opus, {name: "X", model: "claude-haiku-5-5", provider: "mistral"}]})), /provider must be one of/);
 });
 
 test("pricing: Gemini prices, including the scheduled rises", () => {
@@ -1861,6 +1861,192 @@ test("router: each participant's requests go to its provider's backend", async (
 	assert.deepStrictEqual(sent, [["a", "Opus"], ["g", "Gem"], ["a", "Old"]]);
 	assert(router.is_abort_error("g") && !router.is_abort_error("z"));
 	await assert.rejects(new_router({anthropic: make("a")}).send({participant: {name: "Gem", provider: "google"}}), /No backend for provider "google"/);
+});
+
+// ------------------------------------------------------------------------------------------------
+// OpenAI, through the Responses API.
+
+const openai_backend = require("../src/openai_backend");
+
+function oai_response(output, opts = {}) {
+	return {
+		id: `resp_${++tool_id_counter}`,
+		object: "response",
+		status: opts.status || "completed",
+		incomplete_details: opts.incomplete_details || null,
+		model: "gpt-6.1-sol",
+		output: output,
+		usage: opts.usage || {input_tokens: 1000, input_tokens_details: {cached_tokens: 700, cache_write_tokens: 200}, output_tokens: 90, output_tokens_details: {reasoning_tokens: 60}, total_tokens: 1090},
+	};
+}
+
+function fake_openai(respond, opts = {}) {
+	let bodies = [];
+	let warnings = [];
+	let backend = openai_backend.new_openai_backend("okey", {
+		on_warning: (m) => warnings.push(m),
+		sleep: async () => {},
+		fetch: async (url, init) => {
+			assert.strictEqual(url, "https://api.openai.com/v1/responses");
+			assert.strictEqual(init.headers.authorization, "Bearer okey");
+			let body = JSON.parse(init.body);
+			bodies.push(body);
+			return respond(body, bodies.length - 1);
+		},
+	});
+	let send = backend.send.bind(backend);
+	backend.send = async (req) => {
+		if (opts.validate !== false) {
+			validate_request(req);
+		}
+		return send(req);
+	};
+	return {backend, bodies, warnings};
+}
+
+test("openai: room messages become Responses input items, and stranded reasoning is dropped", () => {
+	let reasoning = {type: "reasoning", id: "rs_1", summary: [], encrypted_content: "ENC1"};
+	let call = {type: "function_call", id: "fc_1", call_id: "call_1", name: "calculate", arguments: "{\"expression\":\"2+2\"}", status: "completed"};
+	let lonely = {type: "reasoning", id: "rs_2", summary: [], encrypted_content: "ENC2"};
+	let items = openai_backend.to_input([
+		{role: "user", content: [
+			{type: "text", text: "look"},
+			{type: "image", source: {type: "base64", media_type: "image/png", data: "AAAA"}},
+		]},
+		{role: "assistant", content: [
+			{type: "thinking", thinking: "", signature: "", native: reasoning},
+			{type: "tool_use", id: "call_1", name: "calculate", input: {expression: "2+2"}, native: call},
+		]},
+		{role: "user", content: [{type: "tool_result", tool_use_id: "call_1", content: "2+2 = 4"}]},
+		{role: "assistant", content: [
+			{type: "thinking", thinking: "", signature: "", native: lonely},	// Its reply was cut off, so only rebuilt text follows.
+		]},
+		{role: "assistant", content: [{type: "text", text: "It's 4."}]},
+		{role: "user", content: [{type: "text", text: "next"}]},
+	]);
+	assert.deepStrictEqual(items, [
+		{role: "user", content: [{type: "input_text", text: "look"}, {type: "input_image", image_url: "data:image/png;base64,AAAA"}]},
+		reasoning,
+		call,
+		{type: "function_call_output", call_id: "call_1", output: "2+2 = 4"},
+		{role: "assistant", content: "It's 4."},
+		{role: "user", content: [{type: "input_text", text: "next"}]},
+	]);
+	assert.strictEqual(items[1], reasoning, "native items are sent as the very same objects");
+});
+
+test("openai: replies become Anthropic-shaped messages, with usage converted and strict nulls dropped", () => {
+	let m = openai_backend.to_message(oai_response([
+		{type: "reasoning", id: "rs_1", summary: [{type: "summary_text", text: "Thinking it over."}], encrypted_content: "E"},
+		{type: "message", id: "msg_1", role: "assistant", status: "completed", content: [{type: "output_text", text: "Hello.", annotations: []}]},
+		{type: "function_call", id: "fc_1", call_id: "call_9", name: "write_file", arguments: "{\"filename\":\"a.md\",\"content\":\"x\",\"folder\":null,\"overwrite\":null}"},
+	]));
+	assert.strictEqual(m.stop_reason, "tool_use");
+	assert.deepStrictEqual(m.content.map(b => b.type), ["thinking", "text", "tool_use"]);
+	assert.strictEqual(m.content[0].thinking, "Thinking it over.");
+	assert.deepStrictEqual(m.content[2].input, {filename: "a.md", content: "x"}, "nulls for unused optional fields are dropped");
+	assert.strictEqual(m.content[2].id, "call_9", "the call_id is what tool results refer to");
+	assert.deepStrictEqual(m.usage, {input_tokens: 100, cache_read_input_tokens: 700, cache_creation_input_tokens: 200, output_tokens: 90});
+
+	assert.deepStrictEqual(openai_backend.to_message(oai_response([{type: "function_call", call_id: "c", name: "read_file", arguments: "{not json"}])).content[0].input, {});
+	assert.strictEqual(openai_backend.to_message(oai_response([{type: "message", content: [{type: "output_text", text: "Cut"}]}], {status: "incomplete", incomplete_details: {reason: "max_output_tokens"}})).stop_reason, "max_tokens");
+	let refusal = openai_backend.to_message(oai_response([{type: "message", content: [{type: "refusal", refusal: "I can't help with that."}]}]));
+	assert.strictEqual(refusal.stop_reason, "refusal");
+	assert.strictEqual(refusal.content[0].text, "I can't help with that.");
+	assert.throws(() => openai_backend.to_message({status: "failed", error: {message: "server_error"}}), /failed: server_error/);
+});
+
+test("openai: strict tools send optional fields as nullable and required; others go non-strict", () => {
+	let {make_file_tools} = require("../src/storage");
+	let write_file = make_file_tools(true).find(t => t.name === "write_file");
+	let sent = openai_backend.to_function_tool(write_file, true);
+	assert.strictEqual(sent.strict, true);
+	assert.strictEqual(sent.parameters.additionalProperties, false);
+	assert.deepStrictEqual(sent.parameters.required.slice().sort(), Object.keys(write_file.input_schema.properties).sort());
+	assert.deepStrictEqual(sent.parameters.properties.filename.type, "string", "required fields stay as they were");
+	assert.deepStrictEqual(sent.parameters.properties.folder.type, ["string", "null"]);
+	assert(sent.parameters.properties.folder.enum.includes(null));
+	assert.deepStrictEqual(write_file.input_schema.properties.folder.type, "string", "the room's own tool is untouched");
+
+	let pass_tool = openai_backend.to_function_tool(require("../src/room").TOOLS[0], true);
+	assert.strictEqual(pass_tool.strict, false);
+	let loose = openai_backend.to_function_tool(write_file, false);
+	assert.strictEqual(loose.strict, false);
+	assert.strictEqual(loose.parameters.additionalProperties, undefined);
+	assert.deepStrictEqual(loose.parameters.properties.folder.type, "string");
+});
+
+test("openai in the room: a tool step and a later turn replay OpenAI's items exactly, statelessly", async () => {
+	let reasoning = {type: "reasoning", id: "rs_a", summary: [{type: "summary_text", text: "Use the calculator."}], encrypted_content: "SECRET=="};
+	let call = {type: "function_call", id: "fc_a", call_id: "call_a", name: "calculate", arguments: "{\"expression\":\"6*7\"}", status: "completed"};
+	let answer = {type: "message", id: "msg_a", role: "assistant", status: "completed", phase: "final_answer", content: [{type: "output_text", text: "42, @Opus.", annotations: []}]};
+	let later = {type: "message", id: "msg_b", role: "assistant", status: "completed", content: [{type: "output_text", text: "Agreed.", annotations: []}]};
+
+	let oai = fake_openai((body, n) => json_response(oai_response(n === 0 ? [reasoning, call] : (n === 1 ? [answer] : [later]))));
+	let claude = fake_backend((name, req, n) => speak(`${name} ${n}, over to @Sol`));
+	let cfg = make_cfg({first_speaker: "Sol", opening_message: "Six times seven?", max_turns: 3, farewell_round: false, show_thinking: true,
+		system_prompt: path.join(__dirname, "..", "system", "standard.txt")});
+	cfg.participants[1] = {name: "Sol", model: "gpt-6.1-sol", provider: "openai", full_name: "GPT-6.1 Sol", company: "OpenAI",
+		max_tokens: 8000, effort: "low", price_tiers: pricing.tiers_for("gpt-6.1-sol", null)};
+	let room = new_room(cfg, new_router({anthropic: claude, openai: oai.backend}));
+	await room.run();
+
+	let [first, second, third] = oai.bodies;
+	assert.strictEqual(first.model, "gpt-6.1-sol");
+	assert.strictEqual(first.store, false, "nothing is stored at OpenAI");
+	assert.deepStrictEqual(first.include, ["reasoning.encrypted_content"]);
+	assert.deepStrictEqual(first.reasoning, {effort: "low", summary: "auto"});
+	assert.strictEqual(first.max_output_tokens, 8000);
+	assert(first.instructions.includes("GPT-6.1 Sol, made by OpenAI"));
+	assert.strictEqual(first.previous_response_id, undefined);
+	assert.strictEqual(first.prompt_cache_key, "discourse-Sol-gpt-6.1-sol");
+	assert.strictEqual(first.tools.find(t => t.name === "calculate").strict, true);
+
+	assert.deepStrictEqual(second.input.slice(1), [reasoning, call, {type: "function_call_output", call_id: "call_a", output: "6*7 = 42"}]);
+	assert.deepStrictEqual(third.input.slice(1, 5), [reasoning, call, {type: "function_call_output", call_id: "call_a", output: "6*7 = 42"}, answer]);
+	assert.strictEqual(third.input[5].role, "user");
+	assert(third.input[5].content[0].text.includes("<message from=\"Opus\">"));
+
+	let t = turns(room);
+	assert.deepStrictEqual(t.map(e => e.author), ["Sol", "Opus", "Sol"]);
+	assert.strictEqual(t[0].text, "42, @Opus.");
+	assert.deepStrictEqual(t[0].thinking, ["Use the calculator."]);
+	assert(room.participants[1].cost > 0);
+	assert(!JSON.stringify(claude.calls).includes("SECRET=="), "OpenAI's reasoning never reaches the other models");
+});
+
+test("openai: if the API rejects strict schemas, it carries on without them and says so once", async () => {
+	let {make_file_tools} = require("../src/storage");
+	let o = fake_openai((body) => body.tools.some(t => t.strict)
+		? json_response({error: {message: "Invalid schema for function 'write_file': strict mode is not supported here", type: "invalid_request_error"}}, 400)
+		: json_response(oai_response([{type: "message", content: [{type: "output_text", text: "fine"}]}])), {validate: false});
+	let req = backend_request(make_file_tools(true));
+	assert.strictEqual((await o.backend.send(req)).content[0].text, "fine");
+	await o.backend.send(req);
+	assert.deepStrictEqual(o.bodies.map(b => b.tools.some(t => t.strict)), [true, false, false]);
+	assert.strictEqual(o.warnings.length, 1);
+	assert(o.warnings[0].includes("strict mode is not supported here"));
+
+	let bad = fake_openai(() => json_response({error: {message: "Unsupported value: 'max' for reasoning.effort"}}, 400), {validate: false});
+	await assert.rejects(bad.backend.send(backend_request([])), /OpenAI API error 400: Unsupported value/);
+	assert.strictEqual(bad.bodies.length, 1);
+});
+
+test("pricing and config: OpenAI models", () => {
+	let short = {input_tokens: 100000, cache_read_input_tokens: 100000, cache_creation_input_tokens: 0, output_tokens: 10000};
+	let long = {input_tokens: 300000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 10000};
+	let tiers = pricing.tiers_for("gpt-6.1-sol", null);
+	assert.strictEqual(pricing.cost_of_usage(tiers, short, "5m").toFixed(2), "0.31");
+	assert.strictEqual(pricing.cost_of_usage(tiers, long, "5m").toFixed(2), "1.35", "over 272K, the whole request is repriced");
+
+	let {load_config, read_api_keys} = require("../src/config");
+	let dir = temp_dir();
+	fs.writeFileSync(path.join(dir, "o.txt"), "okey");
+	fs.writeFileSync(path.join(dir, "config.json"), JSON.stringify({openai_api_key_file: "o.txt",
+		participants: [{name: "Sol", model: "gpt-6.1-sol", effort: "xhigh"}, {name: "Luna", model: "gpt-6-luna", effort: "none"}]}));
+	let cfg = load_config(path.join(dir, "config.json"));
+	assert.deepStrictEqual(cfg.participants.map(p => [p.provider, p.company]), [["openai", "OpenAI"], ["openai", "OpenAI"]]);
+	assert.deepStrictEqual(read_api_keys(cfg), {openai: "okey"});
 });
 
 // ------------------------------------------------------------------------------------------------
