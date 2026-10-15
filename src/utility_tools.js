@@ -135,7 +135,7 @@ function new_envelopes() {
 }
 
 function describe_opened(e) {
-	return `envelope #${e.number} ("${e.label}"), which the room has kept unchanged since it was sealed. It contained: ${e.content}`;
+	return `envelope #${e.number} ("${e.label}"): ${e.content}`;
 }
 
 // Returns {content, is_error, summary, announce}. announce is a notice for the other models.

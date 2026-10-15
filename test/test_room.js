@@ -1110,7 +1110,7 @@ test("envelopes: only the sealer opens, once, and the contents are fixed", () =>
 	assert.strictEqual(run("Sonnet", "open_envelope", {number: 2}).is_error, true);
 	assert.strictEqual(run("Sonnet", "open_envelope", {number: "1"}).is_error, true);
 	r = run("Sonnet", "open_envelope", {number: 1});
-	assert.strictEqual(r.announce, "Sonnet opened envelope #1 (\"my number\"), which the room has kept unchanged since it was sealed. It contained: 337");
+	assert.strictEqual(r.announce, "Sonnet opened envelope #1 (\"my number\"): 337");
 	assert.strictEqual(run("Sonnet", "open_envelope", {number: 1}).content, "Error: Envelope #1 is already open.");
 
 	for (let bad of [{label: "", content: "x"}, {label: "x", content: ""}, {label: "x".repeat(101), content: "x"},
@@ -1146,7 +1146,7 @@ test("envelopes in the room: sealed in private, opened in public, opened on leav
 	assert(!before_open.includes("337"), "but not what's in it");
 	let sonnet_after = views.filter(v => v.name === "Sonnet").pop().text;			// Sonnet's turn after Haiku left.
 	assert(sonnet_after.includes("Haiku is leaving, so the room has opened envelope #3 (\\\"hidden role\\\")"), "Haiku's secret opens as it leaves");
-	assert(sonnet_after.includes("It contained: the spy"));
+	assert(sonnet_after.includes("\"): the spy"));
 
 	let kinds = room.log.map(e => e.kind === "notice" ? e.text : (e.kind === "tool_op" ? `op:${e.summary.slice(0, 18)}` : e.kind));
 	assert(kinds.indexOf("Haiku has left the room.") > kinds.findIndex(k => k.startsWith("op:left with an env")), "opened before the departure notice");
@@ -2298,7 +2298,7 @@ test("open_envelope: several at once, with any that can't be opened reported", (
 	run("Luna", "seal_envelope", {label: "c", content: "three"});
 	let r = run("Sol", "open_envelope", {numbers: [1, 2, 3, 1]});
 	assert(!r.is_error);
-	assert(r.content.includes("envelope #1 (\"a\")") && r.content.includes("It contained: two"));
+	assert(r.content.includes("envelope #1 (\"a\")") && r.content.includes("(\"b\"): two"));
 	assert(r.content.includes("Not opened: Envelope #3 is Luna's, and only they can open it."));
 	assert(r.announce.startsWith("Sol opened 2 envelopes: envelope #1"));
 	assert.strictEqual(envelopes.unopened("Luna").length, 1);
