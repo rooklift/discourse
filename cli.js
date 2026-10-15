@@ -205,6 +205,8 @@ async function main() {
 			print(paint(`(${entry.author} ${entry.summary})`, entry.is_error ? 31 : 2));
 		} else if (entry.kind === "error") {
 			print(paint(`Error${entry.author ? ` (${entry.author})` : ""}: ${entry.text}`, 31));
+		} else if (entry.kind === "host_note") {
+			print(paint(`Note to you from ${entry.author}${entry.reply === "when you can" ? " (reply when you can)" : ""}: ${entry.text}`, 1));
 		} else if (entry.kind === "warning") {
 			print(paint(`(Warning: ${entry.text})`, 33));
 		} else if (entry.kind === "turn") {
@@ -255,6 +257,13 @@ async function main() {
 	});
 
 	room.on("closed", () => {
+		let notes = room.notes_for_host();
+		if (notes.length > 0) {
+			print(paint(`Notes left for you this session (${notes.length}):`, 1));
+			for (let n of notes) {
+				print(`  ${n.author}${n.reply === "when you can" ? " (reply when you can)" : ""}: ${n.text}`);
+			}
+		}
 		print(dim(`Total cost: ${money(room.total_cost)}${room.cost_known ? "" : " (incomplete)"}${provider_split(room)}`));
 		print(dim(`Transcript: ${files.md_path}`));
 		if (rl) {

@@ -37,7 +37,29 @@ const TOOLS = [
 			},
 		},
 	},
+	{
+		name: "note_to_host",
+		description: "Leave the host a note, without stopping the room: for a question or comment that doesn't need an answer right now. Only the host sees it; the other models aren't told. The host may not read it straight away. You can still write a message to the room in the same reply.",
+		strict: true,
+		input_schema: {
+			type: "object",
+			properties: {
+				note: {type: "string", description: "The note."},
+				reply: {type: "string", enum: ["not needed", "when you can"], description: "Optional. Whether you'd like a reply. Default: not needed."},
+			},
+			required: ["note"],
+			additionalProperties: false,
+		},
+	},
+	{
+		name: "room_status",
+		description: "Check how much of the room's time and budget is left, and who's here. Only you see the answer. Useful before starting something long, like a game.",
+		input_schema: {type: "object", properties: {}},
+	},
 ];
+
+const ROOM_TOOL_NAMES = ["note_to_host", "room_status"];	// Run by the room itself; like file tools, the turn carries on.
+const MAX_NOTE = 4000;
 
 const CLOSING_PHRASES = {
 	budget: "the budget is nearly spent",
@@ -170,6 +192,21 @@ const room_prototype = {
 	get_participant: function(name) {
 		let lower = String(name).toLowerCase();
 		return this.participants.find(p => p.name.toLowerCase() === lower) || null;
+	},
+
+	// Every note left for the host this session, from note_to_host and from leaving:
+	// [{author, text, reply}], in order.
+
+	notes_for_host: function() {
+		let notes = [];
+		for (let e of this.log) {
+			if (e.kind === "host_note") {
+				notes.push({author: e.author, text: e.text, reply: e.reply});
+			} else if (e.kind === "turn" && e.note_to_host) {
+				notes.push({author: e.author, text: e.note_to_host, reply: "not needed"});
+			}
+		}
+		return notes;
 	},
 
 	// Spending per provider, in the order they first appear in the config:
@@ -661,6 +698,16 @@ const room_prototype = {
 			} else if (t.name === "leave_room") {
 				step.leave = t;
 				step.tool_results.push({tool_use_id: t.id, content: "You have left the room."});
+			} else if (ROOM_TOOL_NAMES.includes(t.name)) {
+				used_tools = true;
+				let r = t.name === "note_to_host" ? this.take_host_note(p, t.input) : this.status_for(p);
+				step.tool_ops.push({tool: t.name, summary: r.summary, is_error: r.is_error});
+				step.tool_results.push({tool_use_id: t.id, content: r.content, is_error: r.is_error});
+				if (r.entry) {
+					this.append(r.entry);			// A note for the host, logged as it's left.
+				} else {
+					this.append({kind: "tool_op", author: p.name, tool: t.name, summary: r.summary, is_error: r.is_error, announce: ""});
+				}
 			} else if ((FILE_TOOL_NAMES.includes(t.name) && p.storage) || UTILITY_TOOL_NAMES.includes(t.name)) {
 				used_tools = true;
 				let r;
@@ -686,6 +733,57 @@ const room_prototype = {
 
 		step.ends_turn = !(used_tools && step.stop_reason === "tool_use" && !step.pass && !step.leave);
 		return step;
+	},
+
+	// note_to_host: a note only the host sees, logged as a "host_note" entry (never shown to the
+	// models). Returns {content, is_error, summary, entry}.
+
+	take_host_note: function(p, input) {
+		let host = this.cfg.host_name;
+		let note = typeof input?.note === "string" ? input.note.trim() : "";
+		if (!note) {
+			return {content: "Error: the note was empty. Write it in \"note\".", is_error: true, summary: "tried to leave an empty note"};
+		}
+		if (note.length > MAX_NOTE) {
+			return {content: `Error: the note is too long (${note.length} characters; at most ${MAX_NOTE}).`, is_error: true, summary: "tried to leave an overlong note"};
+		}
+		let reply = input?.reply === "when you can" ? "when you can" : "not needed";
+		let when = this.cfg.host_present
+			? `${host} may not read it straight away.`
+			: `${host} isn't watching this session live, so will read it afterwards.`;
+		let answer = reply === "when you can" && this.cfg.host_present
+			? ` If ${host} replies, it will be an ordinary message in the room.`
+			: "";
+		return {
+			content: `Your note is on its way to ${host}. The other models aren't told, and the room carries on. ${when}${answer}`,
+			is_error: false,
+			summary: `left a note for ${host}`,
+			entry: {kind: "host_note", author: p.name, text: note, reply},
+		};
+	},
+
+	// room_status: what's left of the session, for the model who asks.
+
+	status_for: function(p) {
+		let lines = [];
+		if (this.closing) {
+			lines.push("The room is closing: this is the farewell round.");
+		}
+		let turns = `${this.turn_count} model turn${this.turn_count === 1 ? "" : "s"} completed so far`;
+		lines.push(this.cfg.max_turns > 0
+			? `Turns: ${turns}, of ${this.cfg.max_turns}. The room starts closing at ${this.cfg.max_turns}.`
+			: `Turns: ${turns}. There's no turn limit.`);
+		if (this.cfg.budget > 0) {
+			let used = Math.min(100, Math.round(100 * this.total_cost / this.cfg.budget));
+			lines.push(`Budget: about ${used}% used${this.cost_known ? "" : " (not counting some models whose prices are unknown)"}. The room starts closing at 90%.`);
+		} else {
+			lines.push("Budget: there's no spending limit.");
+		}
+		let opened = this.log.length > 0 ? Date.parse(this.log[0].time) : Date.now();
+		let minutes = Math.max(0, Math.round((Date.now() - opened) / 60000));
+		lines.push(`Open for: ${minutes} minute${minutes === 1 ? "" : "s"}.`);
+		lines.push(`Here: ${this.present_models().map(m => m.name).join(", ")}, and ${this.cfg.host_name} (the host, ${this.cfg.host_present ? "present, though they may not read everything as it happens" : "not watching live"}).`);
+		return {content: lines.join("\n"), is_error: false, summary: "checked the room status"};
 	},
 
 	record_turn: function(p, steps) {

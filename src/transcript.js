@@ -72,7 +72,11 @@ function attach_transcript(room, cfg) {
 		let split = groups.length > 1
 			? ` (${groups.map(g => `${g.company} $${g.cost.toFixed(2)}${g.known ? "" : " incomplete"}`).join(", ")})`
 			: "";
-		write_md(`---\n\nTotal cost: ${total}${split}\n\n${lines.join("\n")}\n`);
+		let notes = room.notes_for_host();
+		let notes_md = notes.length > 0
+			? `Notes left for ${cfg.host_name}:\n\n${notes.map(n => `- ${n.author}${n.reply === "when you can" ? " (reply when you can)" : ""}: ${n.text}`).join("\n")}\n\n`
+			: "";
+		write_md(`---\n\n${notes_md}Total cost: ${total}${split}\n\n${lines.join("\n")}\n`);
 		write_json({kind: "summary", total_cost: room.total_cost, cost_known: room.cost_known, providers: groups,
 			participants: room.participants.map(p => ({name: p.name, turns: p.turns, cost: p.cost, usage: p.usage}))});
 	});
@@ -106,6 +110,10 @@ function markdown_for(entry, cfg) {
 
 	if (entry.kind === "error") {
 		return `> *Error${entry.author ? ` (${entry.author})` : ""}: ${entry.text}*\n\n`;
+	}
+
+	if (entry.kind === "host_note") {
+		return `> *Note to ${cfg.host_name} from ${entry.author}${entry.reply === "when you can" ? " (reply when you can)" : ""}: ${entry.text}*\n\n`;
 	}
 
 	if (entry.kind === "warning") {

@@ -87,9 +87,9 @@ function validate_request(req) {
 	}
 	assert.strictEqual(typeof req.system, "string");
 	let names = req.tools.map(t => t.name);
-	assert.deepStrictEqual(names.slice(0, 6), ["pass", "leave_room", "roll_dice", "calculate", "seal_envelope", "open_envelope"]);
+	assert.deepStrictEqual(names.slice(0, 9), ["pass", "leave_room", "note_to_host", "room_status", "roll_dice", "shuffle", "calculate", "seal_envelope", "open_envelope"]);
 	assert.strictEqual(new Set(names).size, names.length, "tool names are unique");
-	assert(names.length === 6 || names.length === 13, "either no file tools or all seven");
+	assert(names.length === 9 || names.length === 16, "either no file tools or all seven");
 }
 
 // A fake backend. script(name, req, n) returns a response (or throws). Records all requests.
@@ -1271,7 +1271,7 @@ test("strict tools: required fields only, schemas within the API's strict-mode r
 	for (let has_shared of [false, true]) {
 		let all = TOOLS.concat(UTILITY_TOOLS, make_file_tools(has_shared));
 		let strict = all.filter(t => t.strict);
-		assert.deepStrictEqual(strict.map(t => t.name), ["calculate", "seal_envelope", "open_envelope", "read_file", "search_files", "write_file", "append_file", "edit_file", "delete_file"]);
+		assert.deepStrictEqual(strict.map(t => t.name), ["note_to_host", "shuffle", "calculate", "seal_envelope", "open_envelope", "read_file", "search_files", "write_file", "append_file", "edit_file", "delete_file"]);
 		for (let t of all) {
 			assert.strictEqual(Boolean(t.strict), (t.input_schema.required || []).length > 0, `${t.name}: strict exactly when something is required`);
 		}
@@ -1281,7 +1281,7 @@ test("strict tools: required fields only, schemas within the API's strict-mode r
 			assert.strictEqual(schema.additionalProperties, false, `${t.name} sets additionalProperties: false`);
 			assert(schema.required.every(k => Object.hasOwn(schema.properties, k)), `${t.name}: required fields exist`);
 			let text = JSON.stringify(schema);
-			for (let banned of ["minimum", "maximum", "multipleOf", "minLength", "maxLength", "\"pattern\""]) {
+			for (let banned of ["minimum", "maximum", "multipleOf", "minLength", "maxLength", "minItems", "maxItems", "\"pattern\""]) {
 				assert(!text.includes(banned), `${t.name} uses ${banned}, which strict mode rejects`);
 			}
 			optional += Object.keys(schema.properties).filter(k => !schema.required.includes(k)).length;
@@ -2136,6 +2136,93 @@ test("backend warnings reach the log and transcript, but never the models", asyn
 	assert(fs.readFileSync(files.jsonl_path, "utf8").includes("\"kind\":\"warning\""));
 	let seen = JSON.stringify(claude.calls) + JSON.stringify(gem.bodies.slice(1));
 	assert(!seen.includes("schema-checked"), "no model is told about it");
+});
+
+test("shuffle: a fair Fisher-Yates shuffle or draw, announced to everyone, with checked input", () => {
+	let {run_utility_tool} = require("../src/utility_tools");
+	let r = run_utility_tool({name: "shuffle", input: {items: ["a", "b", "c", "d"]}}, "Argon", {random_int: (lo, hi) => lo});
+	assert.strictEqual(r.summary, "shuffled 4 items (a, b, c, d): b, c, d, a");
+	assert.strictEqual(r.announce, "Argon shuffled 4 items (a, b, c, d): b, c, d, a.");
+	let d = run_utility_tool({name: "shuffle", input: {items: ["a", "b", "c"], draw: 2}}, "Argon", {random_int: (lo, hi) => hi - 1});
+	assert.strictEqual(d.summary, "drew 2 of 3 (a, b, c): a, b");
+	for (let bad of [{items: ["only"]}, {items: "a,b"}, {items: ["a", ""]}, {items: ["a", "b"], draw: 3}, {items: ["a", "b"], draw: 0}, {}]) {
+		assert(run_utility_tool({name: "shuffle", input: bad}, "X").is_error, JSON.stringify(bad));
+	}
+
+	let counts = {};								// Every order of three equally likely, with real randomness.
+	for (let i = 0; i < 6000; i++) {
+		let s = run_utility_tool({name: "shuffle", input: {items: ["a", "b", "c"]}}, "X").summary.split(": ")[1];
+		counts[s] = (counts[s] || 0) + 1;
+	}
+	assert.strictEqual(Object.keys(counts).length, 6);
+	assert(Object.values(counts).every(n => n > 800 && n < 1200), JSON.stringify(counts));
+});
+
+test("note_to_host: reaches the host's log and transcript without stopping the room; the others aren't told", async () => {
+	let room;
+	let backend = fake_backend((name, req, n) => {
+		if (name === "Opus" && n === 0) {
+			return {content: [{type: "tool_use", id: "toolu_note", name: "note_to_host", input: {note: "Could we try a smaller room?", reply: "when you can"}}], stop_reason: "tool_use", usage: usage()};
+		}
+		if (name === "Opus" && n === 1) {
+			return speak("Back to the game, @Sonnet.");
+		}
+		if (name === "Sonnet" && n === 0) {
+			return {content: [{type: "tool_use", id: "toolu_status", name: "room_status", input: {}}], stop_reason: "tool_use", usage: usage()};
+		}
+		if (name === "Haiku") {
+			return leave("Bye.", "Thanks for hosting.");
+		}
+		return speak(`${name} ${n}`);
+	});
+	let cfg = make_cfg({first_speaker: "Opus", opening_message: "Hello", max_turns: 4, budget: 2, host_present: true, farewell_round: false, transcript_dir: temp_dir()});
+	room = new_room(cfg, backend, {template: "x", random: () => 0});
+	let files = require("../src/transcript").attach_transcript(room, cfg);
+	room.on("event", (e) => {
+		if (e.kind === "turn" && room.turn_count >= 4) {
+			room.host_end();
+		}
+	});
+	await room.run();
+
+	let opus_result = backend.calls.filter(c => c.name === "Opus")[1].req.messages.slice(-1)[0].content[0];
+	assert.strictEqual(opus_result.type, "tool_result");
+	assert(opus_result.content.startsWith("Your note is on its way to Host. The other models aren't told, and the room carries on."));
+	assert(opus_result.content.includes("If Host replies, it will be an ordinary message in the room."));
+	let t = turns(room);
+	assert.strictEqual(t[0].author, "Opus");
+	assert.strictEqual(t[0].text, "Back to the game, @Sonnet.", "the same turn went on to speak");
+	assert.deepStrictEqual(room.log.filter(e => e.kind === "host_note").map(e => [e.author, e.text, e.reply]), [["Opus", "Could we try a smaller room?", "when you can"]]);
+
+	let status = backend.calls.filter(c => c.name === "Sonnet")[1].req.messages.slice(-1)[0].content[0].content;
+	assert(status.includes("Turns: 1 model turn completed so far, of 4. The room starts closing at 4."), status);
+	assert(/Budget: about \d+% used\. The room starts closing at 90%\./.test(status), status);
+	assert(status.includes("Here: Opus, Sonnet, Haiku, and Host (the host, present"));
+
+	let others = JSON.stringify(backend.calls.filter(c => c.name !== "Opus"));
+	assert(!others.includes("smaller room"), "the other models never see the note");
+	assert(!JSON.stringify(backend.calls.filter(c => c.name !== "Sonnet")).includes("Turns:"), "nor anyone else's status check");
+
+	assert.deepStrictEqual(room.notes_for_host().map(n => n.author), ["Opus", "Haiku"], "notes from note_to_host and from leaving");
+	let md = fs.readFileSync(files.md_path, "utf8");
+	assert(md.includes("> *Note to Host from Opus (reply when you can): Could we try a smaller room?*"));
+	assert(md.includes("Notes left for Host:\n\n- Opus (reply when you can): Could we try a smaller room?\n- Haiku: Thanks for hosting."));
+
+	let bad = room.take_host_note(room.participants[0], {note: "   "});
+	assert(bad.is_error && !bad.entry);
+	assert(room.take_host_note(room.participants[0], {note: "x".repeat(4001)}).is_error);
+});
+
+test("system prompt: new tools, queued mentions, and that nothing is trimmed", () => {
+	let cfg = make_cfg({host_present: true, system_prompt: path.join(__dirname, "..", "system", "standard.txt")});
+	let s = build_system_prompt(cfg, cfg.participants[0]);
+	assert(s.includes("Nothing is trimmed or summarized"));
+	assert(s.includes("they're queued for the floor in the order you mentioned them"));
+	assert(s.includes("note_to_host leaves them a note without stopping the room"));
+	assert(s.includes("roll_dice and shuffle give real randomness"));
+	assert(s.includes("room_status tells you how much is left"));
+	let absent = build_system_prompt(make_cfg({host_present: false, system_prompt: cfg.system_prompt}), cfg.participants[0]);
+	assert(absent.includes("note_to_host leaves them a note to read afterwards"));
 });
 
 // ------------------------------------------------------------------------------------------------

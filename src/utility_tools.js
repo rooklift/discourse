@@ -1,8 +1,8 @@
 "use strict";
 
-// Tools that aren't about files: dice (real randomness, announced to everyone so games stay
-// fair), a calculator (private, like thinking), and sealed envelopes (a secret the room keeps
-// unchanged until its owner opens it, for games with hidden information).
+// Tools that aren't about files: dice and shuffling (real randomness, announced to everyone so
+// games stay fair), a calculator (private, like thinking), and sealed envelopes (a secret the room
+// keeps unchanged until its owner opens it, for games with hidden information).
 
 const crypto = require("crypto");
 const {calculate, NAMES_HELP} = require("./calc");
@@ -17,6 +17,18 @@ const UTILITY_TOOLS = [
 				sides: {type: "integer", description: "Sides per die, 2 to 1000. Default 6."},
 				count: {type: "integer", description: "How many dice, 1 to 100. Default 1."},
 			},
+		},
+	},
+	{
+		name: "shuffle",
+		description: "Shuffle a list with real randomness, or draw some items from it without replacement: for a turn order, assigning roles, dealing, or picking several different options. Everyone in the room sees the list and the result.",
+		input_schema: {
+			type: "object",
+			properties: {
+				items: {type: "array", items: {type: "string"}, description: "The things to shuffle, 2 to 100 of them, e.g. [\"Opus\", \"Luna\", \"Sol\"]."},
+				draw: {type: "integer", description: "Optional. How many to draw (keep only the first this many after shuffling). Default: all of them, in shuffled order."},
+			},
+			required: ["items"],
 		},
 	},
 	{
@@ -76,6 +88,7 @@ function whole_in_range(value, fallback, min, max, label) {
 // model does can change them after sealing.
 
 const ENVELOPE_LIMITS = {count: 50, label: 100, content: 2000};
+const SHUFFLE_LIMITS = {items: 100, item_length: 200};
 
 function new_envelopes() {
 	return {
@@ -176,6 +189,33 @@ function run_utility_tool(tool_use, actor_name, opts = {}) {
 			};
 		}
 
+		if (tool_use.name === "shuffle") {
+			let items = input.items;
+			if (!Array.isArray(items) || items.length < 2 || items.length > SHUFFLE_LIMITS.items) {
+				throw new Error(`items must be a list of 2 to ${SHUFFLE_LIMITS.items} things.`);
+			}
+			if (items.some(x => typeof x !== "string" || !x.trim() || x.length > SHUFFLE_LIMITS.item_length)) {
+				throw new Error(`each item must be text, 1 to ${SHUFFLE_LIMITS.item_length} characters.`);
+			}
+			items = items.map(x => x.trim().replace(/\s+/g, " "));
+			let draw = whole_in_range(input.draw, items.length, 1, items.length, "draw");
+			let order = items.slice();
+			for (let i = order.length - 1; i > 0; i--) {			// Fisher-Yates.
+				let j = random_int(0, i + 1);
+				[order[i], order[j]] = [order[j], order[i]];
+			}
+			let result = order.slice(0, draw).join(", ");
+			let what = draw === items.length
+				? `shuffled ${items.length} items (${items.join(", ")}): ${result}`
+				: `drew ${draw} of ${items.length} (${items.join(", ")}): ${result}`;
+			return {
+				content: `You ${what}. Everyone sees this result.`,
+				is_error: false,
+				summary: what,
+				announce: `${actor_name} ${what}.`,
+			};
+		}
+
 		if (tool_use.name === "calculate") {
 			let result = calculate(input.expression);
 			let expr = input.expression.length > 80 ? input.expression.slice(0, 80) + "..." : input.expression;
@@ -189,4 +229,4 @@ function run_utility_tool(tool_use, actor_name, opts = {}) {
 	return {content: `Unknown tool: ${tool_use.name}`, is_error: true, summary: "unknown tool", announce: ""};
 }
 
-module.exports = {UTILITY_TOOLS, UTILITY_TOOL_NAMES, run_utility_tool, new_envelopes, describe_opened, ENVELOPE_LIMITS};
+module.exports = {UTILITY_TOOLS, UTILITY_TOOL_NAMES, run_utility_tool, new_envelopes, describe_opened, ENVELOPE_LIMITS, SHUFFLE_LIMITS};
