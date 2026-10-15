@@ -1,10 +1,14 @@
 "use strict";
 
 // Prices in dollars per million tokens, from https://platform.claude.com/docs/en/about-claude/pricing
-// (checked October 2026). A participant can override these with a "prices" object in config.json.
+// and https://ai.google.dev/gemini-api/docs/pricing (both checked October 2026; Gemini prices are
+// the standard paid tier). A participant can override these with a "prices" object in config.json.
 //
 // Each entry is a list of tiers. A request uses the first tier whose up_to is at least the
 // request's total prompt length (uncached input + cache reads + cache writes).
+//
+// Some Gemini prices are already scheduled to rise, so those entries are a list of periods
+// instead, each with the date it ends ("until", exclusive) and its tiers.
 
 const PRICES = {
 	"claude-fable-5-1": [
@@ -20,11 +24,38 @@ const PRICES = {
 		{up_to: 100000, input: 0.10, cache_write_5m: 0.125, cache_write_1h: 0.20, cache_read: 0.01, output: 0.50},
 		{up_to: Infinity, input: 0.50, cache_write_5m: 0.625, cache_write_1h: 1, cache_read: 0.05, output: 2.50},
 	],
+
+	// Gemini caching is implicit: there's no charge for writing to the cache, only a lower price
+	// for reading from it. (Explicit caching, which bills storage, isn't used.)
+
+	"gemini-4-argon": [
+		{until: "2026-12-01", tiers: [gemini(2, 10, 0.10)]},
+		{tiers: [gemini(4, 20, 0.20)]},
+	],
+	"gemini-3.8-flash": [
+		{until: "2027-01-01", tiers: [gemini(0.75, 3.75, 0.075)]},
+		{tiers: [gemini(1.50, 7.50, 0.15)]},
+	],
+	"gemini-3.6-flash": [
+		{until: "2027-01-01", tiers: [gemini(0.75, 3.75, 0.075)]},
+		{tiers: [gemini(1.50, 7.50, 0.15)]},
+	],
+	"gemini-3.5-flash-lite": [gemini(0.30, 2.50, 0.03)],
+	"gemini-3.1-flash-lite": [gemini(0.25, 1.50, 0.025)],
+	"gemini-3.1-pro-preview": [gemini(2, 12, 0.20, 200000), gemini(4, 18, 0.40)],
+	"gemini-2.5-pro": [gemini(1.25, 10, 0.125, 200000), gemini(2.50, 15, 0.25)],
+	"gemini-2.5-flash": [gemini(0.30, 2.50, 0.03)],
 };
+
+function gemini(input, output, cache_read, up_to = Infinity) {
+	return {up_to, input, cache_write_5m: input, cache_write_1h: input, cache_read, output};
+}
 
 const PRICE_FIELDS = ["input", "cache_write_5m", "cache_write_1h", "cache_read", "output"];
 
-function tiers_for(model, override) {
+// now: when the session runs, for prices that change on a set date.
+
+function tiers_for(model, override, now = new Date()) {
 	if (override) {
 		for (let field of PRICE_FIELDS) {
 			if (typeof override[field] !== "number") {
@@ -33,7 +64,15 @@ function tiers_for(model, override) {
 		}
 		return [Object.assign({up_to: Infinity}, override)];
 	}
-	return PRICES[model] || null;
+	let entry = PRICES[model];
+	if (!entry) {
+		return null;
+	}
+	if (entry[0].tiers) {
+		let today = now.toISOString().slice(0, 10);
+		return (entry.find(period => !period.until || today < period.until) || entry[entry.length - 1]).tiers;
+	}
+	return entry;
 }
 
 // Returns the cost in dollars of one response, given its usage object, or null if unknown.

@@ -19,8 +19,10 @@ const DEFAULT_RANDOM_WORDS = 5;
 
 const path = require("path");
 const readline = require("readline");
-const {load_config, read_api_key} = require("./src/config");
+const {load_config, read_api_keys} = require("./src/config");
 const {new_backend} = require("./src/backend");
+const {new_google_backend} = require("./src/google_backend");
+const {new_router} = require("./src/router");
 const {new_room, MAX_IMAGES} = require("./src/room");
 const {attach_transcript} = require("./src/transcript");
 const {load_words, pick_words, word_seed_message} = require("./src/words");
@@ -124,7 +126,7 @@ async function main() {
 
 	let opts;
 	let cfg;
-	let api_key;
+	let api_keys;
 
 	try {
 		opts = parse_args(process.argv.slice(2));
@@ -133,7 +135,7 @@ async function main() {
 			process.exit(0);
 		}
 		cfg = load_config(opts.config);
-		api_key = read_api_key(cfg);
+		api_keys = read_api_keys(cfg);
 		if (opts.message) {
 			cfg.opening_message = opts.message;
 		}
@@ -154,7 +156,13 @@ async function main() {
 		process.exit(1);
 	}
 
-	let room = new_room(cfg, new_backend(api_key, {on_warning: (message) => print(paint(`(Warning: ${message})`, 33))}));
+	let on_warning = (message) => print(paint(`(Warning: ${message})`, 33));
+	let makers = {anthropic: new_backend, google: new_google_backend};
+	let backends = {};
+	for (let [provider, key] of Object.entries(api_keys)) {
+		backends[provider] = makers[provider](key, {on_warning});
+	}
+	let room = new_room(cfg, new_router(backends));
 	let files = attach_transcript(room, cfg);
 
 	let color_of = Object.create(null);

@@ -48,8 +48,8 @@ const CLOSING_PHRASES = {
 };
 
 const MAX_CONSECUTIVE_ERRORS = 3;
-const MAX_TOOL_STEPS = 10;
-const MAX_IMAGES = 20;						// Images the host can share per session; every request resends them all.					// API calls per turn, when a model uses its file tools.
+const MAX_TOOL_STEPS = 10;					// API calls per turn, when a model uses its file tools.
+const MAX_IMAGES = 20;						// Images the host can share per session; every request resends them all.
 
 // ------------------------------------------------------------------------------------------------
 
@@ -883,14 +883,26 @@ const room_prototype = {
 
 // ------------------------------------------------------------------------------------------------
 
+// "native" is a non-Anthropic backend's own form of the block (a Gemini step, say), which that
+// backend replays verbatim; it never reaches any other backend, since a participant's own turns
+// all come from the same one.
+
 function clean_block(b) {
+	let cleaned;
 	if (b.type === "text") {
-		return b.text.trim() ? {type: "text", text: b.text} : null;
+		if (!b.text.trim()) {
+			return null;
+		}
+		cleaned = {type: "text", text: b.text};
+	} else if (b.type === "tool_use") {
+		cleaned = {type: "tool_use", id: b.id, name: b.name, input: b.input ?? {}};
+	} else {
+		return b;								// thinking / redacted_thinking: must be passed back unchanged.
 	}
-	if (b.type === "tool_use") {
-		return {type: "tool_use", id: b.id, name: b.name, input: b.input ?? {}};
+	if (b.native) {
+		cleaned.native = b.native;
 	}
-	return b;									// thinking / redacted_thinking: must be passed back unchanged.
+	return cleaned;
 }
 
 function response_text(response) {

@@ -1584,6 +1584,257 @@ test("the system prompt describes the folder and lists its contents at the start
 });
 
 // ------------------------------------------------------------------------------------------------
+// Gemini, through the Interactions API.
+
+const {new_google_backend, to_steps, to_message} = require("../src/google_backend");
+const {new_router} = require("../src/router");
+
+function interaction(steps, opts = {}) {
+	return {
+		id: `int_${++tool_id_counter}`,
+		object: "interaction",
+		status: opts.status || "completed",
+		model: "gemini-3.8-flash",
+		steps: steps,
+		usage: opts.usage || {total_input_tokens: 1000, total_cached_tokens: 600, total_output_tokens: 50, total_thought_tokens: 30, total_tokens: 1080},
+	};
+}
+
+function json_response(body, status = 200, headers = {}) {
+	return new Response(JSON.stringify(body), {status, headers: Object.assign({"content-type": "application/json"}, headers)});
+}
+
+// A Google backend whose fetch is fake. respond(body, n) returns a Response. Each request the
+// room makes is also checked against the Messages API's rules, so a mixed room's views stay valid.
+
+function fake_google(respond, opts = {}) {
+	let bodies = [];
+	let warnings = [];
+	let sleeps = [];
+	let backend = new_google_backend("gkey", {
+		on_warning: (m) => warnings.push(m),
+		sleep: async (ms) => {
+			sleeps.push(ms);
+		},
+		fetch: async (url, init) => {
+			assert.strictEqual(url, "https://generativelanguage.googleapis.com/v1beta/interactions");
+			assert.strictEqual(init.headers["x-goog-api-key"], "gkey");
+			let body = JSON.parse(init.body);
+			bodies.push(body);
+			return respond(body, bodies.length - 1, init);
+		},
+	});
+	let send = backend.send.bind(backend);
+	backend.send = async (req) => {
+		if (opts.validate !== false) {
+			validate_request(req);
+		}
+		return send(req);
+	};
+	return {backend, bodies, warnings, sleeps};
+}
+
+function gemini_cfg(overrides = {}) {
+	let cfg = make_cfg(overrides);
+	cfg.participants[1] = {
+		name: "Gemini", model: "gemini-3.8-flash", provider: "google", full_name: "Gemini 3.8 Flash", company: "Google",
+		max_tokens: 8000, effort: "low", price_tiers: pricing.tiers_for("gemini-3.8-flash", null, new Date("2026-10-15")),
+	};
+	cfg.participants[0].provider = "anthropic";
+	cfg.participants[2].provider = "anthropic";
+	return cfg;
+}
+
+test("gemini: room messages become Interactions steps, with images, tool results and native replay", () => {
+	let native_thought = {type: "thought", signature: "SIG1", summary: []};
+	let native_call = {type: "function_call", id: "fc1", name: "calculate", arguments: {expression: "2+2"}};
+	let steps = to_steps([
+		{role: "user", content: [
+			{type: "text", text: "<message from=\"Host (host)\">\nlook\n</message>"},
+			{type: "image", source: {type: "base64", media_type: "image/jpeg", data: "AAAA"}},
+		]},
+		{role: "assistant", content: [
+			{type: "thinking", thinking: "", signature: "SIG1", native: native_thought},
+			{type: "tool_use", id: "fc1", name: "calculate", input: {expression: "2+2"}, native: native_call},
+		]},
+		{role: "user", content: [{type: "tool_result", tool_use_id: "fc1", content: "4"}]},
+		{role: "assistant", content: [{type: "text", text: "It's 4."}]},		// No native step: rebuilt.
+		{role: "user", content: [
+			{type: "tool_result", tool_use_id: "x9", content: "Bad.", is_error: true},
+			{type: "text", text: "next"},
+		]},
+	]);
+	assert.deepStrictEqual(steps, [
+		{type: "user_input", content: [{type: "text", text: "<message from=\"Host (host)\">\nlook\n</message>"}, {type: "image", data: "AAAA", mime_type: "image/jpeg"}]},
+		native_thought,
+		native_call,
+		{type: "function_result", call_id: "fc1", result: "4", name: "calculate"},
+		{type: "model_output", content: [{type: "text", text: "It's 4."}]},
+		{type: "function_result", call_id: "x9", result: "Bad.", is_error: true},
+		{type: "user_input", content: [{type: "text", text: "next"}]},
+	]);
+	assert.strictEqual(steps[1], native_thought, "native steps are sent as the very same objects");
+});
+
+test("gemini: replies become Anthropic-shaped messages, with usage converted and stop reasons mapped", () => {
+	let m = to_message(interaction([
+		{type: "thought", signature: "S", summary: [{type: "text", text: "Hmm."}]},
+		{type: "model_output", content: [{type: "text", text: "Hello "}, {type: "text", text: "there."}]},
+	]));
+	assert.strictEqual(m.stop_reason, "end_turn");
+	assert.deepStrictEqual(m.content.map(b => [b.type, b.thinking ?? b.text]), [["thinking", "Hmm."], ["text", "Hello there."]]);
+	assert.deepStrictEqual(m.usage, {input_tokens: 400, cache_read_input_tokens: 600, cache_creation_input_tokens: 0, output_tokens: 80});
+
+	let calls = to_message(interaction([{type: "function_call", id: "a", name: "pass", arguments: {}}], {status: "requires_action"}));
+	assert.strictEqual(calls.stop_reason, "tool_use");
+	assert.deepStrictEqual(calls.content[0], {type: "tool_use", id: "a", name: "pass", input: {}, native: {type: "function_call", id: "a", name: "pass", arguments: {}}});
+
+	assert.strictEqual(to_message(interaction([{type: "model_output", content: [{type: "text", text: "Cut o"}]}], {status: "incomplete"})).stop_reason, "max_tokens");
+	assert.throws(() => to_message(Object.assign(interaction([]), {status: "failed", errors: [{message: "boom"}]})), /failed: boom/);
+	assert.throws(() => to_message(interaction([{type: "model_output", error: {message: "blocked"}}])), /no reply: blocked/);
+});
+
+test("gemini in the room: a tool step and a later turn replay Gemini's steps exactly, statelessly", async () => {
+	let thought = {type: "thought", signature: "OPAQUE==", summary: [{type: "text", text: "Let me check."}]};
+	let call = {type: "function_call", id: "call_1", name: "calculate", arguments: {expression: "6*7"}};
+	let answer = {type: "model_output", content: [{type: "text", text: "It's 42, @Opus."}]};
+	let later = {type: "model_output", content: [{type: "text", text: "Agreed."}]};
+
+	let google = fake_google((body, n) => json_response(interaction(
+		n === 0 ? [thought, call] : (n === 1 ? [answer] : [later]),
+		n === 0 ? {status: "requires_action"} : {},
+	)));
+	let claude = fake_backend((name, req, n) => speak(`${name} ${n}, over to @Gemini`));
+	let cfg = gemini_cfg({first_speaker: "Gemini", opening_message: "What's six times seven?", max_turns: 3, farewell_round: false, show_thinking: true, system_prompt: path.join(__dirname, "..", "system", "standard.txt")});
+	let room = new_room(cfg, new_router({anthropic: claude, google: google.backend}));
+	await room.run();
+
+	let [first, second, third] = google.bodies;
+	assert.strictEqual(first.model, "gemini-3.8-flash");
+	assert.strictEqual(first.store, false, "nothing is stored at Google");
+	assert.strictEqual(first.previous_interaction_id, undefined);
+	assert.strictEqual(typeof first.system_instruction, "string");
+	assert(first.system_instruction.includes("Gemini 3.8 Flash"));
+	assert.deepStrictEqual(first.generation_config, {max_output_tokens: 8000, thinking_level: "low", thinking_summaries: "auto", tool_choice: "validated"});
+	let calc = first.tools.find(t => t.name === "calculate");
+	assert.strictEqual(calc.type, "function");
+	assert.strictEqual(calc.parameters.properties.expression.type, "string");
+	assert.strictEqual(calc.strict, undefined, "Anthropic's strict flag isn't sent to Google");
+	assert.strictEqual(calc.parameters.additionalProperties, undefined);
+	assert.deepStrictEqual(calc.parameters.required, ["expression"]);
+	assert.strictEqual(first.tools.find(t => t.name === "pass").parameters, undefined, "a tool that takes nothing has no parameters");
+	assert(room.participants[1].tools.find(t => t.name === "calculate").input_schema.additionalProperties === false, "the room's own tools are untouched");
+	assert.strictEqual(first.input.length, 1);
+	assert.strictEqual(first.input[0].type, "user_input");
+	assert(first.input[0].content[0].text.includes("What's six times seven?"));
+
+	assert.deepStrictEqual(second.input.slice(1), [thought, call, {type: "function_result", call_id: "call_1", result: "6*7 = 42", name: "calculate"}]);
+
+	assert.deepStrictEqual(third.input.slice(1, 4), [thought, call, {type: "function_result", call_id: "call_1", result: "6*7 = 42", name: "calculate"}]);
+	assert.deepStrictEqual(third.input[4], answer, "the final step's text is replayed as Gemini sent it");
+	assert.strictEqual(third.input[5].type, "user_input");
+	assert(third.input[5].content[0].text.includes("<message from=\"Opus\">"));
+
+	let t = turns(room);
+	assert.deepStrictEqual(t.map(e => e.author), ["Gemini", "Opus", "Gemini"]);
+	assert.strictEqual(t[0].text, "It's 42, @Opus.");
+	assert.deepStrictEqual(t[0].thinking, ["Let me check."], "thought summaries reach the host's record");
+	assert(room.participants[1].cost > 0, "Gemini's usage is priced");
+	let opus_view = claude.calls[0].req.messages;
+	assert(!JSON.stringify(opus_view).includes("OPAQUE=="), "Gemini's reasoning never reaches the other models");
+	assert(!JSON.stringify(opus_view).includes("native"));
+});
+
+test("gemini: rate limits and server errors are retried, then a 400 is reported", async () => {
+	let replies = [
+		json_response({error: {code: 429, message: "slow down"}}, 429, {"retry-after": "2"}),
+		json_response({error: {code: 503, message: "busy"}}, 503),
+		json_response(interaction([{type: "model_output", content: [{type: "text", text: "ok"}]}])),
+	];
+	let g = fake_google((body, n) => replies[n], {validate: false});
+	let reply = await g.backend.send(backend_request([]));
+	assert.strictEqual(reply.content[0].text, "ok");
+	assert.strictEqual(g.bodies.length, 3);
+	assert.strictEqual(g.sleeps[0], 2000, "Retry-After is honoured");
+
+	let bad = fake_google(() => json_response({error: {code: 400, message: "input[3]: bad step"}}, 400), {validate: false});
+	await assert.rejects(bad.backend.send(backend_request([])), /Google API error 400: input\[3\]: bad step/);
+	assert.strictEqual(bad.bodies.length, 1, "a 400 isn't retried");
+});
+
+test("gemini: if schema-checked tool calls are refused, it carries on without them and says so once", async () => {
+	let {make_file_tools} = require("../src/storage");
+	let g = fake_google((body) => body.generation_config.tool_choice === "validated"
+		? json_response({error: {code: 400, message: "tool_choice 'validated' is not supported for this model"}}, 400)
+		: json_response(interaction([{type: "model_output", content: [{type: "text", text: "fine"}]}])), {validate: false});
+	let req = backend_request(make_file_tools(true));
+	assert.strictEqual((await g.backend.send(req)).content[0].text, "fine");
+	await g.backend.send(req);
+	assert.deepStrictEqual(g.bodies.map(b => b.generation_config.tool_choice), ["validated", "auto", "auto"]);
+	assert.strictEqual(g.warnings.length, 1);
+});
+
+test("gemini: /quit aborts a request, even while it waits to retry", async () => {
+	let controller = new AbortController();
+	let backend = new_google_backend("k", {fetch: async () => json_response({error: {message: "busy"}}, 503)});
+	let pending = backend.send(Object.assign(backend_request([]), {signal: controller.signal}));
+	setTimeout(() => controller.abort(), 20);
+	let error = await pending.catch(e => e);
+	assert(backend.is_abort_error(error), `expected an abort, got ${error}`);
+});
+
+test("config: providers, key files, efforts and companies per participant", () => {
+	let {load_config, read_api_keys} = require("../src/config");
+	let dir = temp_dir();
+	fs.writeFileSync(path.join(dir, "g.txt"), "gkey\n");
+	fs.writeFileSync(path.join(dir, "a.txt"), "akey\n");
+	let write = (obj) => {
+		let file = path.join(dir, "config.json");
+		fs.writeFileSync(file, JSON.stringify(obj));
+		return file;
+	};
+	let gem = {name: "Gemini", model: "gemini-3.8-flash", effort: "minimal"};
+	let opus = {name: "Opus", model: "claude-opus-5-5"};
+
+	let cfg = load_config(write({google_api_key_file: "g.txt", budget: 1, participants: [gem, Object.assign({}, gem, {name: "Argon", model: "gemini-4-argon", effort: ""})]}));
+	assert.deepStrictEqual(cfg.participants.map(p => [p.provider, p.company]), [["google", "Google"], ["google", "Google"]]);
+	assert.deepStrictEqual(read_api_keys(cfg), {google: "gkey"}, "no Anthropic key needed for an all-Gemini room");
+
+	cfg = load_config(write({api_key_file: "a.txt", google_api_key_file: "g.txt", participants: [opus, gem]}));
+	assert.deepStrictEqual(read_api_keys(cfg), {anthropic: "akey", google: "gkey"});
+	assert.strictEqual(cfg.participants[0].company, "Anthropic");
+
+	assert.throws(() => load_config(write({api_key_file: "a.txt", participants: [opus, gem]})), /needs "google_api_key_file"/);
+	assert.throws(() => load_config(write({google_api_key_file: "g.txt", participants: [opus, gem]})), /needs "api_key_file"/);
+	assert.throws(() => load_config(write({api_key_file: "a.txt", google_api_key_file: "g.txt", participants: [Object.assign({}, opus, {effort: "minimal"}), gem]})), /effort must be one of/);
+	assert.throws(() => load_config(write({api_key_file: "a.txt", google_api_key_file: "g.txt", participants: [opus, Object.assign({}, gem, {effort: "max"})]})), /effort must be one of/);
+	assert.throws(() => load_config(write({api_key_file: "a.txt", participants: [opus, Object.assign({}, opus, {name: "X", provider: "openai"})]})), /provider must be one of/);
+});
+
+test("pricing: Gemini prices, including the scheduled rises", () => {
+	let usage = {input_tokens: 1000000, cache_read_input_tokens: 1000000, cache_creation_input_tokens: 0, output_tokens: 1000000};
+	let at = (model, date) => pricing.cost_of_usage(pricing.tiers_for(model, null, new Date(date)), usage, "5m");
+	assert.strictEqual(at("gemini-3.8-flash", "2026-12-31T23:00:00Z").toFixed(3), "4.575");
+	assert.strictEqual(at("gemini-3.8-flash", "2027-01-01T00:00:00Z").toFixed(3), "9.150");
+	assert.strictEqual(at("gemini-4-argon", "2026-11-30T12:00:00Z").toFixed(2), "12.10");
+	assert.strictEqual(at("gemini-4-argon", "2026-12-01T12:00:00Z").toFixed(2), "24.20");
+	let long = {input_tokens: 250000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 0};
+	assert.strictEqual(pricing.cost_of_usage(pricing.tiers_for("gemini-3.1-pro-preview", null), long, "5m").toFixed(2), "1.00", "over 200k uses the long-prompt tier");
+});
+
+test("router: each participant's requests go to its provider's backend", async () => {
+	let sent = [];
+	let make = (name) => ({send: async (req) => sent.push([name, req.participant.name]), is_abort_error: (e) => e === name});
+	let router = new_router({anthropic: make("a"), google: make("g")});
+	await router.send({participant: {name: "Opus", provider: "anthropic"}});
+	await router.send({participant: {name: "Gem", provider: "google"}});
+	await router.send({participant: {name: "Old"}});
+	assert.deepStrictEqual(sent, [["a", "Opus"], ["g", "Gem"], ["a", "Old"]]);
+	assert(router.is_abort_error("g") && !router.is_abort_error("z"));
+	await assert.rejects(new_router({anthropic: make("a")}).send({participant: {name: "Gem", provider: "google"}}), /No backend for provider "google"/);
+});
+
+// ------------------------------------------------------------------------------------------------
 
 (async () => {
 	let failed = 0;
@@ -1593,7 +1844,8 @@ test("the system prompt describes the folder and lists its contents at the start
 			console.log(`  ok    ${t.name}${note ? ` (${note})` : ""}`);
 		} catch (error) {
 			failed++;
-			console.log(`  FAIL  ${t.name}\n        ${error.stack.split("\n").slice(0, 3).join("\n        ")}`);
+			let lines = process.env.FULL_ERRORS ? error.stack.split("\n") : error.stack.split("\n").slice(0, 3);
+			console.log(`  FAIL  ${t.name}\n        ${lines.join("\n        ")}`);
 		}
 	}
 	console.log(failed ? `\n${failed} of ${tests.length} failed` : `\nAll ${tests.length} passed`);

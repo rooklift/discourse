@@ -6,7 +6,8 @@ const path = require("path");
 const pricing = require("./pricing");
 
 const DEFAULTS = {
-	api_key_file: "",				// Required. Path to a file containing only the API key. Keep it outside the repo.
+	api_key_file: "",				// Path to a file containing only your Anthropic API key. Keep it outside the repo.
+	google_api_key_file: "",		// The same for a Gemini API key, if any participant is a Gemini model.
 	host_name: "Host",				// What the models call you.
 	host_present: true,				// If false, the room runs unattended and closes when it goes quiet.
 	system_prompt: "./system/standard.txt",
@@ -26,15 +27,26 @@ const DEFAULTS = {
 
 const PARTICIPANT_DEFAULTS = {
 	name: "",						// Required. Short name used in the room, e.g. "Opus". Used for @mentions.
-	model: "",						// Required. API model ID, e.g. "claude-opus-5-5".
+	model: "",						// Required. API model ID, e.g. "claude-opus-5-5" or "gemini-3.8-flash".
+	provider: "",					// "anthropic" or "google". Worked out from the model ID if blank.
 	full_name: "",					// Shown to the other models, e.g. "Claude Opus 5.5". Defaults to the model ID.
-	company: "Anthropic",
-	max_tokens: 16000,				// Hard limit on thinking + reply, per turn.
-	effort: "",						// "low", "medium", "high", "xhigh", "max", or "" for the model's default.
+	company: "",					// Shown to the other models. Defaults to the provider's company.
+	max_tokens: 16000,				// Hard limit on thinking + reply, per turn. (Gemini models allow up to 65,536.)
+	effort: "",						// See PROVIDERS below for the choices; "" for the model's default.
 	prices: null,					// Optional override of the built-in price table.
 };
 
-const EFFORTS = ["", "low", "medium", "high", "xhigh", "max"];
+// Per provider: what "effort" may be set to, the company behind it, and the config key for its
+// API key file. For Gemini models, effort is the thinking level.
+
+const PROVIDERS = {
+	anthropic: {company: "Anthropic", key_file: "api_key_file", efforts: ["", "low", "medium", "high", "xhigh", "max"]},
+	google: {company: "Google", key_file: "google_api_key_file", efforts: ["", "minimal", "low", "medium", "high"]},
+};
+
+function provider_for(model) {
+	return /^gemini-/i.test(model) ? "google" : "anthropic";
+}
 
 function expand_home(p) {
 	if (p === "~" || p.startsWith("~/") || p.startsWith("~\\")) {
@@ -70,16 +82,13 @@ function load_config(config_path) {
 	check_keys(raw, DEFAULTS, "config");
 	let cfg = Object.assign({}, DEFAULTS, raw);
 
-	if (!cfg.api_key_file) {
-		throw new Error("config needs \"api_key_file\": the path to a file containing your API key");
-	}
 	// Paths written in the config are relative to the config file. Defaults are relative to the
 	// program itself, so a config kept elsewhere still finds the bundled prompt and word list.
 
 	let app_dir = path.resolve(__dirname, "..");
-	for (let key of ["api_key_file", "system_prompt", "transcript_dir", "word_list", "storage_dir"]) {
-		if (key === "storage_dir" && !cfg[key]) {
-			continue;							// Empty: no storage.
+	for (let key of ["api_key_file", "google_api_key_file", "system_prompt", "transcript_dir", "word_list", "storage_dir"]) {
+		if (["api_key_file", "google_api_key_file", "storage_dir"].includes(key) && !cfg[key]) {
+			continue;							// Empty: not used (or, for storage, turned off).
 		}
 		cfg[key] = resolve_path(cfg[key], Object.hasOwn(raw, key) ? base_dir : app_dir);
 	}
@@ -114,9 +123,18 @@ function load_config(config_path) {
 			throw new Error(`participant name "${o.name}" is reserved for the shared folder`);
 		}
 		seen[lower] = true;
-		if (!EFFORTS.includes(o.effort)) {
-			throw new Error(`participant ${o.name}: effort must be one of ${EFFORTS.map(e => JSON.stringify(e)).join(", ")}`);
+		o.provider = o.provider || provider_for(o.model);
+		let provider = Object.hasOwn(PROVIDERS, o.provider) ? PROVIDERS[o.provider] : null;
+		if (!provider) {
+			throw new Error(`participant ${o.name}: provider must be one of ${Object.keys(PROVIDERS).map(k => JSON.stringify(k)).join(", ")}`);
 		}
+		if (!provider.efforts.includes(o.effort)) {
+			throw new Error(`participant ${o.name}: effort must be one of ${provider.efforts.map(e => JSON.stringify(e)).join(", ")}`);
+		}
+		if (!cfg[provider.key_file]) {
+			throw new Error(`participant ${o.name} is a ${provider.company} model, so the config needs "${provider.key_file}": the path to a file containing your ${provider.company} API key`);
+		}
+		o.company = o.company || provider.company;
 		o.full_name = o.full_name || o.model;
 		o.price_tiers = pricing.tiers_for(o.model, o.prices);
 		if (!o.price_tiers && cfg.budget > 0) {
@@ -132,15 +150,27 @@ function load_config(config_path) {
 	return cfg;
 }
 
-function read_api_key(cfg) {
-	if (!fs.existsSync(cfg.api_key_file)) {
-		throw new Error(`API key file not found: ${cfg.api_key_file}`);
+function read_key_file(file) {
+	if (!fs.existsSync(file)) {
+		throw new Error(`API key file not found: ${file}`);
 	}
-	let key = fs.readFileSync(cfg.api_key_file, "utf8").trim();
+	let key = fs.readFileSync(file, "utf8").trim();
 	if (!key) {
-		throw new Error(`API key file is empty: ${cfg.api_key_file}`);
+		throw new Error(`API key file is empty: ${file}`);
 	}
 	return key;
 }
 
-module.exports = {load_config, read_api_key};
+// Returns {provider: key} for each provider some participant uses.
+
+function read_api_keys(cfg) {
+	let keys = {};
+	for (let p of cfg.participants) {
+		if (!keys[p.provider]) {
+			keys[p.provider] = read_key_file(cfg[PROVIDERS[p.provider].key_file]);
+		}
+	}
+	return keys;
+}
+
+module.exports = {load_config, read_api_keys, PROVIDERS};

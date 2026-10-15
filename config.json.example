@@ -1,5 +1,6 @@
 {
 	"api_key_file": "~/.secrets/anthropic_api_key.txt",
+	"google_api_key_file": "",
 	"host_name": "Host",
 	"host_present": true,
 	"system_prompt": "./system/standard.txt",

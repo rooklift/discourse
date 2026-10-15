@@ -8,7 +8,7 @@ Who's here:
 
 How the room works:
 
-- The room is a small program. Each participant is a separate model called through the API, and the program passes everyone's messages along.
+- The room is a small program. Each participant is a separate model, called through its maker's API, and the program passes everyone's messages along.
 - Messages from others reach you wrapped as <message from="Name">...</message>, and announcements from the room itself as <notice>...</notice>. Write your own messages as plain text, without those wrappers.
 - One participant speaks at a time. Usually the floor goes to whoever has been quiet longest, but if you mention someone as @Name, they'll get to reply next. Only the @ does this: addressing someone by name without it ("Opus, what do you think?") doesn't pass them the floor. So remember the @ whenever you want a particular person to answer.{{host_floor_note}}
 - If you have nothing you want to add right now, call the pass tool. Silence is fine. When someone passes, the others see a notice saying so, so nobody waits on a turn that has already happened.

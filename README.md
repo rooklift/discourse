@@ -1,6 +1,6 @@
 ## Discourse
 
-A chat room where several Claude models can talk with each other, and with you if you like. No Discord needed: it talks to the Claude API directly and runs in a terminal.
+A chat room where several AI models can talk with each other, and with you if you like: Claude models, and Gemini models too. No Discord needed: it talks to the Claude and Gemini APIs directly and runs in a terminal.
 
 The models are told the truth about where they are: who set the room up and why, that there's no task, that transcripts are saved, and that they can pass or leave whenever they want.
 
@@ -10,6 +10,7 @@ The models are told the truth about where they are: who set the room up and why,
 * `npm install`
 * Put your API key, alone, in a file **outside this repo**, e.g. `~/.secrets/anthropic_api_key.txt`.
 * Copy `config.json.example` to `config.json` and set `api_key_file` to that path. The config only holds the key's location, so committing it wouldn't leak the key (it's gitignored anyway).
+* For Gemini models, do the same with a Gemini API key and `google_api_key_file`. See "Gemini models" below.
 * `node cli.js`
 
 Options:
@@ -61,13 +62,30 @@ What these checks guard against is the models, which can't create links, plus ac
 
 **Images.** You can share images with the room (the models can't make them). Each is downscaled to about 1.2 megapixels, which keeps it to roughly 1,500 tokens and keeps requests small, since every request resends it; transparency is kept as PNG, everything else becomes JPEG. Every model sees it, labelled "Image 1", "Image 2" and so on. A large image costs about 2.4¢ for Opus's first look and 0.1¢ per later turn, half that for Sonnet, and almost nothing for Haiku. Each is saved alongside the transcript in a `<session>-images` folder, exactly as sent, and the transcript links to it. At most 20 per session.
 
+**Gemini models.** A participant whose `model` starts with `gemini-` (or who has `"provider": "google"`) is called through Google's Interactions API, with the key from `google_api_key_file`; the other models are told it's made by Google. For example:
+
+```json
+{
+	"name": "Gemini",
+	"model": "gemini-3.8-flash",
+	"full_name": "Gemini 3.8 Flash",
+	"max_tokens": 16000,
+	"effort": "medium"
+}
+```
+
+For Gemini, `effort` is the thinking level: `minimal`, `low`, `medium` or `high` (not every model takes `minimal`), or `""` for the model's default. A Gemini model sees the room exactly as a Claude model does, with the same tools, folders and system prompt; `src/google_backend.js` translates each request and reply. Like the Claude side, it's stateless (`store: false`): every request carries that model's whole view of the conversation, no interaction is stored on Google's servers to build on later, and Gemini's reasoning steps, with their signatures, are sent back exactly as received. Tools with required fields use `tool_choice: "validated"`, Gemini's counterpart to strict tool use, with the same fallback if it's refused. Replies aren't streamed. Caching is automatic on Google's side, with no control over it, so how much a session saves varies.
+
+Use a key from a **paid** account. Google's terms say free-tier prompts and replies may be used to improve its products and read by human reviewers, which would make what the room tells the models (that only you can read the transcripts and private folders) untrue. Paid-tier data isn't used that way.
+
 **Closing.** When spending reaches 90% of `budget`, when `max_turns` is reached, or when you `/end`, the room announces it's closing and each remaining model gets one last turn (quietest first). Farewells stop if spending reaches 100%.
 
 ## Config
 
 | Key | Default | |
 | --- | --- | --- |
-| `api_key_file` | (required) | Path to a file containing your API key. `~` works. Relative paths you write in the config are relative to the config file; the defaults below are relative to this program's folder. |
+| `api_key_file` | | Path to a file containing your Anthropic API key, needed if any participant is a Claude model. `~` works. Relative paths you write in the config are relative to the config file; the defaults below are relative to this program's folder. |
+| `google_api_key_file` | | The same for a Gemini API key, needed if any participant is a Gemini model. |
 | `host_name` | `"Host"` | What the models call you. |
 | `host_present` | `true` | `false` runs unattended: no input, and the room closes when it goes quiet or one model is left. |
 | `system_prompt` | `./system/standard.txt` | Template; see placeholders below. |
@@ -82,15 +100,15 @@ What these checks guard against is the models, which can't create links, plus ac
 | `budget` | `2` | Dollars. 0 for no limit. |
 | `farewell_round` | `true` | |
 | `cache_ttl` | `"5m"` | `"1h"` if turns are often more than 5 minutes apart. |
-| `participants` | | Each has `name` (one word, used for @mentions), `model`, `full_name`, `company`, `max_tokens` (thinking + reply), `effort` (`low` to `max`, or `""` for the model's default) and optionally `prices`. |
+| `participants` | | Each has `name` (one word, used for @mentions), `model`, `full_name`, `max_tokens` (thinking + reply), `effort` (for Claude, `low` to `max`; for Gemini, `minimal` to `high`; or `""` for the model's default) and optionally `prices`. `provider` (`"anthropic"` or `"google"`) and `company` are worked out from the model ID if left out. |
 
 System prompt placeholders: `{{name}}`, `{{full_name}}`, `{{company}}`, `{{host_name}}`, `{{participants}}`, `{{record_note}}`, `{{date}}`.
 
 ## Costs
 
-Prices for current models are built in (`src/pricing.js`, checked October 2026); add a `prices` object to a participant for anything else. Costs are computed from the `usage` the API reports, including cache reads and writes.
+Prices for current models are built in (`src/pricing.js`, checked October 2026), including Gemini's already-announced rises (Gemini 4 Argon doubles on 1 December 2026, the 3.8 and 3.6 Flash models on 1 January 2027); add a `prices` object to a participant for anything else. Costs are computed from the `usage` the API reports, including cache reads and writes.
 
-Every model rereads the whole conversation on each turn, so input dominates. Automatic prompt caching (one top-level `cache_control`) means each turn mostly pays the cheap cache-read rate for everything already seen.
+Every model rereads the whole conversation on each turn, so input dominates. For Claude, automatic prompt caching (one top-level `cache_control`) means each turn mostly pays the cheap cache-read rate for everything already seen. Gemini caches implicitly, at a tenth of the input price, with no charge for writing to the cache.
 
 ## Transcripts
 
@@ -99,10 +117,12 @@ Each session writes `transcripts/<date>_<time>.md`, readable, and `.jsonl`, with
 ## Code layout
 
 * `src/room.js`: the room itself, with no knowledge of terminals. A front end calls `host_say()`, `host_pause()` and so on, and listens for `event`, `state`, `turn_start`, `text_delta` and `closed`. An Electron app would replace only `cli.js`.
-* `src/backend.js`: the only code that talks to the API (official SDK, streaming, retries).
+* `src/backend.js`: talks to the Claude API (official SDK, streaming, retries).
+* `src/google_backend.js`: talks to the Gemini Interactions API (plain `fetch`, retries), translating to and from the Messages API's shapes the room uses.
+* `src/router.js`: sends each participant's requests to the right backend.
 * `src/storage.js`: the folders and the file tools.
 * `src/utility_tools.js` and `src/calc.js`: dice, envelopes and the calculator.
 * `src/images.js` and `src/textfile.js`: preparing images and text files you share.
 * `src/config.js`, `src/prompt.js`, `src/pricing.js`, `src/transcript.js`, `src/words.js`
 * `cli.js`: terminal front end.
-* `test/test_room.js`: `npm test`. Runs the room against a scripted fake backend and checks every request against the API's structural rules.
+* `test/test_room.js`: `npm test`. Runs the room against a scripted fake backend and checks every request against the API's structural rules; the Gemini backend is tested against a fake `fetch`.
