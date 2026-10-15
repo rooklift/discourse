@@ -6,14 +6,14 @@ const path = require("path");
 const pricing = require("./pricing");
 
 const DEFAULTS = {
-	api_key_file: "",				// Path to a file containing only your Anthropic API key. Keep it outside the repo.
+	anthropic_api_key_file: "",		// Path to a file containing only your Anthropic API key. Keep it outside the repo.
 	google_api_key_file: "",		// The same for a Gemini API key, if any participant is a Gemini model.
 	host_name: "Host",				// What the models call you.
 	host_present: true,				// If false, the room runs unattended and closes when it goes quiet.
 	system_prompt: "./system/standard.txt",
 	transcript_dir: "./transcripts",
 	word_list: "./words.txt",		// One word per line; used by the CLI's --random option.
-	storage_dir: "./storage",		// A private folder per model, plus "shared", kept between sessions. "" turns this off.
+	storage_dir: "./storage",		// A private folder per model (named by model ID), plus "shared", kept between sessions. "" turns this off.
 	show_thinking: false,			// Ask the API for thinking summaries, show them to the host and save them.
 	opening_message: "",			// Optional first message from the host.
 	first_speaker: "",				// Optional name of the participant who speaks first. Random if blank.
@@ -40,7 +40,7 @@ const PARTICIPANT_DEFAULTS = {
 // API key file. For Gemini models, effort is the thinking level.
 
 const PROVIDERS = {
-	anthropic: {company: "Anthropic", key_file: "api_key_file", efforts: ["", "low", "medium", "high", "xhigh", "max"]},
+	anthropic: {company: "Anthropic", key_file: "anthropic_api_key_file", efforts: ["", "low", "medium", "high", "xhigh", "max"]},
 	google: {company: "Google", key_file: "google_api_key_file", efforts: ["", "minimal", "low", "medium", "high"]},
 };
 
@@ -79,6 +79,10 @@ function load_config(config_path) {
 	let raw = JSON.parse(fs.readFileSync(config_path, "utf8"));
 	let base_dir = path.dirname(path.resolve(config_path));
 
+	if (Object.hasOwn(raw, "api_key_file")) {
+		throw new Error("\"api_key_file\" has been renamed \"anthropic_api_key_file\"; please rename it in your config");
+	}
+
 	check_keys(raw, DEFAULTS, "config");
 	let cfg = Object.assign({}, DEFAULTS, raw);
 
@@ -86,8 +90,8 @@ function load_config(config_path) {
 	// program itself, so a config kept elsewhere still finds the bundled prompt and word list.
 
 	let app_dir = path.resolve(__dirname, "..");
-	for (let key of ["api_key_file", "google_api_key_file", "system_prompt", "transcript_dir", "word_list", "storage_dir"]) {
-		if (["api_key_file", "google_api_key_file", "storage_dir"].includes(key) && !cfg[key]) {
+	for (let key of ["anthropic_api_key_file", "google_api_key_file", "system_prompt", "transcript_dir", "word_list", "storage_dir"]) {
+		if (["anthropic_api_key_file", "google_api_key_file", "storage_dir"].includes(key) && !cfg[key]) {
 			continue;							// Empty: not used (or, for storage, turned off).
 		}
 		cfg[key] = resolve_path(cfg[key], Object.hasOwn(raw, key) ? base_dir : app_dir);
@@ -105,6 +109,7 @@ function load_config(config_path) {
 	}
 
 	let seen = Object.create(null);
+	let seen_models = Object.create(null);
 
 	cfg.participants = cfg.participants.map((p, i) => {
 		check_keys(p, PARTICIPANT_DEFAULTS, `participant ${i + 1}`);
@@ -119,10 +124,23 @@ function load_config(config_path) {
 		if (seen[lower] || lower === cfg.host_name.toLowerCase()) {
 			throw new Error(`participant name "${o.name}" is used twice (or clashes with host_name)`);
 		}
-		if (lower === "shared") {
-			throw new Error(`participant name "${o.name}" is reserved for the shared folder`);
-		}
 		seen[lower] = true;
+
+		// Each model's private folder is named after its model ID, so with storage on, the ID
+		// must make a safe folder name, and a model can take only one seat: two seats would share
+		// a folder that each was told is private.
+
+		if (cfg.storage_dir) {
+			let model = o.model.toLowerCase();
+			if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(o.model) || o.model.endsWith(".") || model === "shared") {
+				throw new Error(`model "${o.model}" can't be used as a storage folder name; set storage_dir to "" to use it`);
+			}
+			if (seen_models[model]) {
+				throw new Error(`${seen_models[model]} and ${o.name} are both ${o.model}. Each model has one private folder, so with storage on, a model can take only one seat (set storage_dir to "" to seat it twice)`);
+			}
+			seen_models[model] = o.name;
+		}
+
 		o.provider = o.provider || provider_for(o.model);
 		let provider = Object.hasOwn(PROVIDERS, o.provider) ? PROVIDERS[o.provider] : null;
 		if (!provider) {
@@ -132,7 +150,7 @@ function load_config(config_path) {
 			throw new Error(`participant ${o.name}: effort must be one of ${provider.efforts.map(e => JSON.stringify(e)).join(", ")}`);
 		}
 		if (!cfg[provider.key_file]) {
-			throw new Error(`participant ${o.name} is a ${provider.company} model, so the config needs "${provider.key_file}": the path to a file containing your ${provider.company} API key`);
+			throw new Error(`participant ${o.name} is a model from ${provider.company}, so the config needs "${provider.key_file}": the path to a file containing your ${provider.company} API key`);
 		}
 		o.company = o.company || provider.company;
 		o.full_name = o.full_name || o.model;

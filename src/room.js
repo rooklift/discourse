@@ -71,7 +71,7 @@ function new_room(cfg, backend, opts = {}) {
 		random: opts.random || Math.random,		// Injectable for tests.
 
 		participants: cfg.participants.map(p => {
-			let storage = cfg.storage_dir ? new_storage(cfg.storage_dir, p.name) : null;
+			let storage = cfg.storage_dir ? new_storage(cfg.storage_dir, p.model) : null;	// Named by model ID, not room name.
 			let storage_info = storage ? {listing: storage.listing(), shared_listing: shared.listing(), limits: LIMITS} : null;
 			return {
 				name: p.name,

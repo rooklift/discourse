@@ -647,7 +647,7 @@ test("quitting mid-turn keeps the record of steps already taken", async () => {
 	});
 	await room.run();
 
-	assert.strictEqual(fs.readFileSync(path.join(root, "Opus", "notes.md"), "utf8"), "kept");
+	assert.strictEqual(fs.readFileSync(path.join(root, "claude-opus-5-5", "notes.md"), "utf8"), "kept");
 	assert.strictEqual(at_close.turns, 1, "the interrupted turn was logged before 'closed' fired");
 	assert.strictEqual(at_close.turn_count, 1);
 	assert.deepStrictEqual(turns(room)[0].tool_ops.map(o => o.summary), ["created notes.md (4 bytes)"]);
@@ -671,7 +671,7 @@ test("a reply that arrives after /quit isn't acted on", async () => {
 	});
 	room = new_room(make_cfg({storage_dir: root, host_present: true}), backend, {template: "x", random: () => 0});
 	await room.run();
-	assert(!fs.existsSync(path.join(root, "Opus", "late.md")), "no file tool ran after the room closed");
+	assert(!fs.existsSync(path.join(root, "claude-opus-5-5", "late.md")), "no file tool ran after the room closed");
 	assert.strictEqual(turns(room).length, 0);
 });
 
@@ -801,8 +801,8 @@ test("an event listener that quits mid-step stops the remaining tools", async ()
 	});
 	await room.run();
 
-	assert(fs.existsSync(path.join(root, "Opus", "first.md")));
-	assert(!fs.existsSync(path.join(root, "Opus", "second.md")), "the second tool never ran");
+	assert(fs.existsSync(path.join(root, "claude-opus-5-5", "first.md")));
+	assert(!fs.existsSync(path.join(root, "claude-opus-5-5", "second.md")), "the second tool never ran");
 	assert.strictEqual(at_close.turns, 1, "the turn was recorded before 'closed' fired");
 	assert.strictEqual(room.log.length, at_close.log_length, "nothing was logged after closing");
 	let t = turns(room)[0];
@@ -1423,14 +1423,43 @@ test("text files and images together in one message", async () => {
 	assert(content.map(b => b.text || "").join("").includes("<message from=\"Host (host)\">\n<file name=\"n.txt\">"));
 });
 
-test("config: the name 'shared' is reserved", () => {
+test("config: with storage on, folders are named by model, so each model takes one seat", () => {
+	let {load_config} = require("../src/config");
 	let dir = temp_dir();
 	let key = path.join(dir, "key.txt");
 	fs.writeFileSync(key, "k");
 	let cfg_path = path.join(dir, "config.json");
-	let participants = [{name: "Opus", model: "claude-opus-5-5"}, {name: "Shared", model: "claude-haiku-5-5"}];
-	fs.writeFileSync(cfg_path, JSON.stringify({api_key_file: key, participants}));
-	assert.throws(() => require("../src/config").load_config(cfg_path), /reserved for the shared folder/);
+	let load = (obj) => {
+		fs.writeFileSync(cfg_path, JSON.stringify(Object.assign({anthropic_api_key_file: key, budget: 0}, obj)));
+		return load_config(cfg_path);
+	};
+	let opus = {name: "Opus", model: "claude-opus-5-5"};
+	let twin = {name: "Twin", model: "Claude-Opus-5-5"};
+	assert.throws(() => load({participants: [opus, twin]}), /Opus and Twin are both Claude-Opus-5-5/);
+	assert.strictEqual(load({storage_dir: "", participants: [opus, twin]}).participants.length, 2, "fine with storage off");
+	assert.throws(() => load({participants: [opus, {name: "X", model: "../escape"}]}), /can't be used as a storage folder name/);
+	assert.throws(() => load({participants: [opus, {name: "X", model: "shared"}]}), /can't be used as a storage folder name/);
+	assert.strictEqual(load({participants: [opus, {name: "Shared", model: "claude-haiku-5-5"}]}).participants[1].name, "Shared", "a participant may be called Shared now");
+
+	fs.writeFileSync(cfg_path, JSON.stringify({api_key_file: key, participants: [opus, {name: "Haiku", model: "claude-haiku-5-5"}]}));
+	assert.throws(() => load_config(cfg_path), /"api_key_file" has been renamed "anthropic_api_key_file"/);
+});
+
+test("storage: a model keeps its folder under any room name, and the prompt says so", () => {
+	let root = temp_dir();
+	let system_prompt = path.join(__dirname, "..", "system", "standard.txt");
+	let first = new_room(make_cfg({storage_dir: root, system_prompt}), fake_backend(() => speak("x")));
+	first.participants[0].storage.write("notes.md", "from Opus", "t");
+	assert(fs.existsSync(path.join(root, "claude-opus-5-5", "notes.md")));
+	assert(!fs.existsSync(path.join(root, "Opus")));
+
+	let cfg = make_cfg({storage_dir: root, system_prompt});
+	cfg.participants[0].name = "Magnus";
+	let second = new_room(cfg, fake_backend(() => speak("x")));
+	assert.strictEqual(second.participants[0].storage.read("notes.md").text, "from Opus");
+	let s = second.participants[0].system;
+	assert(s.includes("It belongs to your model, claude-opus-5-5, rather than to your name here"));
+	assert(s.includes("- notes.md"));
 });
 
 test("storage: a folder replaced by a link after startup is refused", () => {
@@ -1532,8 +1561,8 @@ test("a turn can use file tools, then speak; others see only the message", async
 	assert.strictEqual(t[0].steps.length, 2);
 	assert.strictEqual(t[0].text, "I saved a note for next time.");
 	assert.deepStrictEqual(t[0].tool_ops.map(o => o.summary), ["created notes.md (20 bytes)"]);
-	assert.strictEqual(fs.readFileSync(path.join(root, "Opus", "notes.md"), "utf8"), "Remember the badger.");
-	assert(fs.existsSync(path.join(root, "Sonnet")) && fs.existsSync(path.join(root, "Haiku")), "every model gets a folder");
+	assert.strictEqual(fs.readFileSync(path.join(root, "claude-opus-5-5", "notes.md"), "utf8"), "Remember the badger.");
+	assert(fs.existsSync(path.join(root, "claude-sonnet-5-5")) && fs.existsSync(path.join(root, "claude-haiku-5-5")), "every model gets a folder");
 
 	let opus_calls = backend.calls.filter(c => c.name === "Opus");
 	let step2 = opus_calls[1].req.messages;
@@ -1568,7 +1597,7 @@ test("a turn stops after the step limit, and the room carries on", async () => {
 
 test("the system prompt describes the folder and lists its contents at the start", () => {
 	let root = temp_dir();
-	new_storage(root, "Sonnet").write("diary.md", "Day one.", "Claude Sonnet 5.5 (claude-sonnet-5-5)");
+	new_storage(root, "claude-sonnet-5-5").write("diary.md", "Day one.", "Claude Sonnet 5.5 (claude-sonnet-5-5)");
 	let cfg = make_cfg({storage_dir: root, system_prompt: path.join(__dirname, "..", "system", "standard.txt")});
 	let room = new_room(cfg, fake_backend(() => speak("x")));
 	let s = room.participants[1].system;
@@ -1800,15 +1829,15 @@ test("config: providers, key files, efforts and companies per participant", () =
 	assert.deepStrictEqual(cfg.participants.map(p => [p.provider, p.company]), [["google", "Google"], ["google", "Google"]]);
 	assert.deepStrictEqual(read_api_keys(cfg), {google: "gkey"}, "no Anthropic key needed for an all-Gemini room");
 
-	cfg = load_config(write({api_key_file: "a.txt", google_api_key_file: "g.txt", participants: [opus, gem]}));
+	cfg = load_config(write({anthropic_api_key_file: "a.txt", google_api_key_file: "g.txt", participants: [opus, gem]}));
 	assert.deepStrictEqual(read_api_keys(cfg), {anthropic: "akey", google: "gkey"});
 	assert.strictEqual(cfg.participants[0].company, "Anthropic");
 
-	assert.throws(() => load_config(write({api_key_file: "a.txt", participants: [opus, gem]})), /needs "google_api_key_file"/);
-	assert.throws(() => load_config(write({google_api_key_file: "g.txt", participants: [opus, gem]})), /needs "api_key_file"/);
-	assert.throws(() => load_config(write({api_key_file: "a.txt", google_api_key_file: "g.txt", participants: [Object.assign({}, opus, {effort: "minimal"}), gem]})), /effort must be one of/);
-	assert.throws(() => load_config(write({api_key_file: "a.txt", google_api_key_file: "g.txt", participants: [opus, Object.assign({}, gem, {effort: "max"})]})), /effort must be one of/);
-	assert.throws(() => load_config(write({api_key_file: "a.txt", participants: [opus, Object.assign({}, opus, {name: "X", provider: "openai"})]})), /provider must be one of/);
+	assert.throws(() => load_config(write({anthropic_api_key_file: "a.txt", participants: [opus, gem]})), /needs "google_api_key_file"/);
+	assert.throws(() => load_config(write({google_api_key_file: "g.txt", participants: [opus, gem]})), /Opus is a model from Anthropic, so the config needs "anthropic_api_key_file"/);
+	assert.throws(() => load_config(write({anthropic_api_key_file: "a.txt", google_api_key_file: "g.txt", participants: [Object.assign({}, opus, {effort: "minimal"}), gem]})), /effort must be one of/);
+	assert.throws(() => load_config(write({anthropic_api_key_file: "a.txt", google_api_key_file: "g.txt", participants: [opus, Object.assign({}, gem, {effort: "max"})]})), /effort must be one of/);
+	assert.throws(() => load_config(write({anthropic_api_key_file: "a.txt", participants: [opus, {name: "X", model: "claude-haiku-5-5", provider: "openai"}]})), /provider must be one of/);
 });
 
 test("pricing: Gemini prices, including the scheduled rises", () => {

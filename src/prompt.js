@@ -31,7 +31,7 @@ function storage_note(cfg, me, storage) {
 	let kb = (n) => `${Math.round(n / 1024)} KB`;
 	return `Your folders:
 
-You have a private folder of your own for text files, and it's kept between sessions, so anything you save will still be there the next time you're in this room. It belongs to "${me.name}" in this room: if ${cfg.host_name} upgrades the model behind that name, the next version gets the same folder, and each file records which model version last wrote it. The other models can't see your private folder, but ${cfg.host_name} can read it.
+You have a private folder of your own for text files, and it's kept between sessions, so anything you save will still be there the next time you're in this room. It belongs to your model, ${me.model}, rather than to your name here: whatever name you have in a future session, you'll find the same folder, while any other model, including a newer version of you, gets a folder of its own. Each file records which model last wrote it. The other models can't see your private folder, but ${cfg.host_name} can read it.
 
 There is also one shared folder, kept between sessions too, which every model in the room can read and write: for things you make together, or leave for each other. When someone changes a shared file, the others get a notice saying so.
 
