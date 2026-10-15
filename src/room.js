@@ -95,7 +95,7 @@ function new_room(cfg, backend, opts = {}) {
 		cfg: cfg,
 		backend: backend,
 		shared_storage: shared,
-		envelopes: new_envelopes(),				// Sealed secrets for games; this session only.
+		envelopes: new_envelopes(),				// Secrets for games; this session only.
 		random: opts.random || Math.random,		// Injectable for tests.
 
 		participants: cfg.participants.map(p => {
@@ -860,15 +860,15 @@ const room_prototype = {
 			p.present = false;
 			this.floor_queue = this.floor_queue.filter(n => n !== p.name);
 
-			// A secret can't leave the game with its keeper: their locked envelopes open for all.
-			// Others stay sealed, since anyone can open those when the time comes (opening a bid
-			// early, before everyone has sealed, would spoil the round).
+			// A secret can't leave the game with its keeper: their sealed envelopes open for all.
+			// The others stay closed, since anyone can open those when the time comes (opening a
+			// bid early, before everyone's are in, would spoil the round).
 
-			for (let e of this.envelopes.unopened_locked(p.name)) {
+			for (let e of this.envelopes.unopened_sealed(p.name)) {
 				e.opened = true;
 				this.append({
 					kind: "tool_op", author: p.name, tool: "open_envelope", is_error: false,
-					summary: `left with an envelope still sealed, so the room opened ${describe_opened(e)}`,
+					summary: `left with a sealed envelope unopened, so the room opened ${describe_opened(e)}`,
 					announce: `${p.name} is leaving, so the room has opened ${describe_opened(e)}`,
 				});
 			}
@@ -912,7 +912,7 @@ const room_prototype = {
 
 		if (!this.closed) {
 			this.apply_pending_host_messages();
-			this.reveal_sealed_to_host();
+			this.reveal_unopened_to_host();
 			this.notice("The room is now closed.");
 			this.finish(reason);
 		}
@@ -921,7 +921,7 @@ const room_prototype = {
 	// Envelopes nobody opened go into the host's transcript as the room closes. The models
 	// never see these entries (no announcement), since the room is ending anyway.
 
-	reveal_sealed_to_host: function() {
+	reveal_unopened_to_host: function() {
 		for (let e of this.envelopes.unopened()) {
 			e.opened = true;
 			this.append({kind: "tool_op", author: e.author, tool: "envelope", is_error: false, announce: "",
@@ -1043,7 +1043,7 @@ const room_prototype = {
 		if (turn && turn.steps.length > 0) {
 			this.record_turn(turn.p, turn.steps);
 		}
-		this.reveal_sealed_to_host();
+		this.reveal_unopened_to_host();
 		this.notice("The room was closed by the host.");
 		this.finish("quit");
 	},

@@ -1,9 +1,9 @@
 "use strict";
 
 // Tools that aren't about files: dice and shuffling (real randomness, announced to everyone so
-// games stay fair), a calculator (private, like thinking), and sealed envelopes (a secret the room
-// keeps unchanged until it's opened, for games with hidden information). Anyone can open an
-// envelope, so a round's bids can all be revealed in one call, unless its sealer locked it.
+// games stay fair), a calculator (private, like thinking), and envelopes (a secret the room keeps
+// unchanged until it's opened, for games with hidden information). Anyone can open an envelope, so
+// a round's bids can all be revealed in one call, unless its creator sealed it.
 
 const crypto = require("crypto");
 const {calculate, NAMES_HELP} = require("./calc");
@@ -42,24 +42,24 @@ const UTILITY_TOOLS = [
 		},
 	},
 	{
-		name: "seal_envelope",
-		description: "Seal a secret in an envelope that the room keeps: a bid, a number to guess, a prediction. Everyone is told you sealed it, and its label, but not what's inside, and the room guarantees the contents can't change. By default anyone can open it with open_envelope, which shows everyone what was inside, so when everyone has sealed, one person can reveal them all at once. Set locked if only you should be able to open it, for example a prediction to reveal yourself later; if you leave the room, your locked envelopes are opened for everyone. Envelopes last for this session only.",
+		name: "create_envelope",
+		description: "Put a secret in an envelope that the room keeps: a bid, a number to guess, a prediction. Everyone is told you created it, and its label, but not what's inside, and the room guarantees the contents can't change. By default anyone can open it with open_envelope, which shows everyone what was inside, so when everyone's envelopes are in, one person can reveal them all at once. Set sealed if only you should be able to open it, for example a prediction to reveal yourself later; if you leave the room, your sealed envelopes are opened for everyone. Envelopes last for this session only.",
 		input_schema: {
 			type: "object",
 			properties: {
 				label: {type: "string", description: "A short public label, e.g. \"round 2 bid\". Everyone sees this."},
 				content: {type: "string", description: "The secret. The other models don't see this until the envelope is opened (the host's records do include it)."},
-				locked: {type: "boolean", description: "Optional. If true, only you can open it (everyone still sees what's inside when you do). Default false: anyone can."},
+				sealed: {type: "boolean", description: "Optional. If true, only you can open it (everyone still sees what's inside when you do). Default false: anyone can."},
 			},
 			required: ["label", "content"],
 		},
 	},
 	{
 		name: "open_envelope",
-		description: "Open one or more sealed envelopes, showing everyone what's inside. You can open anyone's, unless they locked it; it's usual to wait until everyone has sealed, or until the sealer says it's time.",
+		description: "Open one or more envelopes, showing everyone what's inside. You can open anyone's, unless they sealed it; it's usual to wait until everyone's envelopes are in, or until the creator says it's time.",
 		input_schema: {
 			type: "object",
-			properties: {numbers: {type: "array", items: {type: "integer"}, description: "The envelope numbers, as announced when they were sealed, e.g. [3] or [3, 5, 8]."}},
+			properties: {numbers: {type: "array", items: {type: "integer"}, description: "The envelope numbers, as announced when they were created, e.g. [3] or [3, 5, 8]."}},
 			required: ["numbers"],
 		},
 	},
@@ -87,7 +87,7 @@ function whole_in_range(value, fallback, min, max, label) {
 }
 
 // The room's envelopes for one session. Contents are held here, not in any file, so nothing a
-// model does can change them after sealing.
+// model does can change them once created.
 
 const ENVELOPE_LIMITS = {count: 200, label: 100, content: 2000};
 const SHUFFLE_LIMITS = {items: 100, item_length: 200};
@@ -97,7 +97,7 @@ function new_envelopes() {
 
 		list: [],
 
-		seal: function(author, label, content, locked = false) {
+		create: function(author, label, content, sealed = false) {
 			if (typeof label !== "string" || !label.trim() || label.length > ENVELOPE_LIMITS.label) {
 				throw new Error(`label must be text, 1 to ${ENVELOPE_LIMITS.label} characters.`);
 			}
@@ -107,7 +107,7 @@ function new_envelopes() {
 			if (this.list.length >= ENVELOPE_LIMITS.count) {
 				throw new Error(`The room can hold at most ${ENVELOPE_LIMITS.count} envelopes in a session.`);
 			}
-			let envelope = {number: this.list.length + 1, author, label: label.trim().replace(/\s+/g, " "), content, locked: locked === true, opened: false};
+			let envelope = {number: this.list.length + 1, author, label: label.trim().replace(/\s+/g, " "), content, sealed: sealed === true, opened: false};
 			this.list.push(envelope);
 			return envelope;
 		},
@@ -120,8 +120,8 @@ function new_envelopes() {
 			if (!envelope) {
 				throw new Error(`There's no envelope #${number}.`);
 			}
-			if (envelope.locked && envelope.author !== opener) {
-				throw new Error(`Envelope #${number} is locked: only ${envelope.author} can open it.`);
+			if (envelope.sealed && envelope.author !== opener) {
+				throw new Error(`Envelope #${number} is sealed: only ${envelope.author} can open it.`);
 			}
 			if (envelope.opened) {
 				throw new Error(`Envelope #${number} is already open.`);
@@ -134,8 +134,8 @@ function new_envelopes() {
 			return this.list.filter(e => !e.opened && (author === null || e.author === author));
 		},
 
-		unopened_locked: function(author) {
-			return this.unopened(author).filter(e => e.locked);
+		unopened_sealed: function(author) {
+			return this.unopened(author).filter(e => e.sealed);
 		},
 	};
 }
@@ -159,18 +159,19 @@ function run_utility_tool(tool_use, actor_name, opts = {}) {
 	let input = (tool_use.input && typeof tool_use.input === "object") ? tool_use.input : {};
 
 	try {
-		if (tool_use.name === "seal_envelope" || tool_use.name === "open_envelope") {
+		if (tool_use.name === "create_envelope" || tool_use.name === "open_envelope") {
 			if (!opts.envelopes) {
 				throw new Error("There are no envelopes in this room.");
 			}
-			if (tool_use.name === "seal_envelope") {
-				let e = opts.envelopes.seal(actor_name, input.label, input.content, input.locked === true);
-				let who_opens = e.locked ? `It's locked, so only you can open it` : `Anyone can open it`;
+			if (tool_use.name === "create_envelope") {
+				let e = opts.envelopes.create(actor_name, input.label, input.content, input.sealed === true);
+				let verb = e.sealed ? "created and sealed" : "created";
+				let who_opens = e.sealed ? `It's sealed, so only you can open it` : `Anyone can open it`;
 				return {
-					content: `Sealed envelope #${e.number} ("${e.label}"). Everyone has been told it exists, but not what's inside. ${who_opens}, with open_envelope, number ${e.number}.`,
+					content: `You ${verb} envelope #${e.number} ("${e.label}"). Everyone has been told it exists, but not what's inside. ${who_opens}, with open_envelope, number ${e.number}.`,
 					is_error: false,
-					summary: `sealed ${e.locked ? "locked " : ""}envelope #${e.number} ("${e.label}")`,		// No contents here: the host may be playing too.
-					announce: `${actor_name} sealed ${e.locked ? "locked " : ""}envelope #${e.number}: "${e.label}".${e.locked ? ` Only ${actor_name} can open it.` : ""}`,
+					summary: `${verb} envelope #${e.number} ("${e.label}")`,		// No contents here: the host may be playing too.
+					announce: `${actor_name} ${verb} envelope #${e.number}: "${e.label}".${e.sealed ? ` Only ${actor_name} can open it.` : ""}`,
 				};
 			}
 			// Several at once: each valid one opens, and any that can't be opened are reported.
