@@ -87,7 +87,7 @@ function whole_in_range(value, fallback, min, max, label) {
 // The room's envelopes for one session. Contents are held here, not in any file, so nothing a
 // model does can change them after sealing.
 
-const ENVELOPE_LIMITS = {count: 50, label: 100, content: 2000};
+const ENVELOPE_LIMITS = {count: 200, label: 100, content: 2000};
 const SHUFFLE_LIMITS = {items: 100, item_length: 200};
 
 function new_envelopes() {

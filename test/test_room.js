@@ -1120,7 +1120,7 @@ test("envelopes: only the sealer opens, once, and the contents are fixed", () =>
 	for (let i = envelopes.list.length; i < ENVELOPE_LIMITS.count; i++) {
 		run("Opus", "seal_envelope", {label: "filler", content: "x"});
 	}
-	assert(run("Opus", "seal_envelope", {label: "one too many", content: "x"}).content.includes("at most 50"));
+	assert(run("Opus", "seal_envelope", {label: "one too many", content: "x"}).content.includes(`at most ${ENVELOPE_LIMITS.count}`));
 	assert.strictEqual(run_utility_tool({name: "seal_envelope", input: {label: "x", content: "y"}}, "Opus").is_error, true, "no envelopes without a room");
 });
 
