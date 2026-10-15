@@ -38,6 +38,11 @@ const TOOLS = [
 		},
 	},
 	{
+		name: "sit_out",
+		description: "Sit out for a while: stop taking turns until someone @mentions you, for example while a game you're not in plays out. The others are told you're sitting out and that an @mention brings you back. When you're back, you'll see everything that happened meanwhile. You can write a message in the same reply.",
+		input_schema: {type: "object", properties: {}},
+	},
+	{
 		name: "note_to_host",
 		description: "Leave the host a note, without stopping the room: for a question or comment that doesn't need an answer right now. Only the host sees it; the other models aren't told. The host may not read it straight away. You can still write a message to the room in the same reply.",
 		strict: true,
@@ -103,6 +108,7 @@ function new_room(cfg, backend, opts = {}) {
 				tools: TOOLS.concat(UTILITY_TOOLS, storage ? file_tools : []),
 				system: build_system_prompt(cfg, p, opts.template ?? null, storage_info),
 				present: true,
+				sitting_out: false,					// True after sit_out, until someone @mentions this model.
 				last_spoke: -1,						// Value of message_count when this model last spoke.
 				last_floor: -1,						// Value of floor_count when this model last had the floor (spoke, passed or failed).
 				turns: 0,
@@ -165,6 +171,7 @@ const room_prototype = {
 			total_cost: this.total_cost,
 			cost_known: this.cost_known,
 			present: this.present_models().map(p => p.name),
+			sitting_out: this.present_models().filter(p => p.sitting_out).map(p => p.name),
 		};
 	},
 
@@ -354,6 +361,9 @@ const room_prototype = {
 			p.last_spoke = this.message_count;
 		}
 		let mentioned = this.mentions_in(text).filter(n => n !== author && this.get_participant(n).present);
+		for (let n of mentioned) {
+			this.get_participant(n).sitting_out = false;		// An @mention brings a model back.
+		}
 		let rest = this.floor_queue.filter(n => n !== author && !mentioned.includes(n));
 		this.floor_queue = mentioned.concat(rest);
 
@@ -366,7 +376,7 @@ const room_prototype = {
 	},
 
 	eligible: function() {
-		return this.present_models().filter(p => p.name !== this.last_speaker && !this.passed.has(p.name));
+		return this.present_models().filter(p => p.name !== this.last_speaker && !this.passed.has(p.name) && !p.sitting_out);
 	},
 
 	choose_next: function() {
@@ -672,6 +682,7 @@ const room_prototype = {
 			tool_results: [],
 			tool_ops: [],
 			pass: false,
+			sit_out: false,
 			leave: null,
 			usage: usage,
 			cost: cost,
@@ -705,6 +716,9 @@ const room_prototype = {
 			if (t.name === "pass") {
 				step.pass = true;
 				step.tool_results.push({tool_use_id: t.id, content: turn_text.trim() ? "Your message was posted." : "You passed."});
+			} else if (t.name === "sit_out") {
+				step.sit_out = true;
+				step.tool_results.push({tool_use_id: t.id, content: `You're sitting out${turn_text.trim() ? ", and your message was posted" : ""}. You won't get the floor until someone @mentions you${this.cfg.host_present ? ` (or ${this.cfg.host_name} gives it to you)` : ""}, and then you'll see everything that happened meanwhile.`});
 			} else if (t.name === "leave_room") {
 				step.leave = t;
 				step.tool_results.push({tool_use_id: t.id, content: "You have left the room."});
@@ -741,7 +755,7 @@ const room_prototype = {
 			}
 		}
 
-		step.ends_turn = !(used_tools && step.stop_reason === "tool_use" && !step.pass && !step.leave);
+		step.ends_turn = !(used_tools && step.stop_reason === "tool_use" && !step.pass && !step.sit_out && !step.leave);
 		return step;
 	},
 
@@ -792,6 +806,10 @@ const room_prototype = {
 		let opened = this.log.length > 0 ? Date.parse(this.log[0].time) : Date.now();
 		let minutes = Math.max(0, Math.round((Date.now() - opened) / 60000));
 		lines.push(`Open for: ${minutes} minute${minutes === 1 ? "" : "s"}.`);
+		let sitting = this.present_models().filter(m => m.sitting_out).map(m => m.name);
+		if (sitting.length > 0) {
+			lines.push(`Sitting out until mentioned: ${sitting.join(", ")}.`);
+		}
 		lines.push(`Here: ${this.present_models().map(m => m.name).join(", ")}, and ${this.cfg.host_name} (the host, ${this.cfg.host_present ? "present, though they may not read everything as it happens" : "not watching live"}).`);
 		return {content: lines.join("\n"), is_error: false, summary: "checked the room status"};
 	},
@@ -805,7 +823,8 @@ const room_prototype = {
 		let text = steps.map(s => s.text.trim()).filter(Boolean).join("\n\n");
 		let leave = steps.map(s => s.leave).find(Boolean) || null;
 		let pass = steps.some(s => s.pass);
-		let action = leave ? "leave" : (text ? "speak" : (pass ? "pass" : "silent"));
+		let sit_out = !leave && steps.some(s => s.sit_out);
+		let action = leave ? "leave" : (text ? "speak" : (sit_out ? "sit_out" : (pass ? "pass" : "silent")));
 		let note = typeof leave?.input?.note_to_host === "string" ? leave.input.note_to_host.trim() : "";
 		let costs = steps.map(s => s.cost);
 		let last = steps[steps.length - 1];
@@ -829,6 +848,12 @@ const room_prototype = {
 			this.on_message(p.name, text);
 		} else {
 			this.passed.add(p.name);
+		}
+
+		if (sit_out) {
+			p.sitting_out = true;
+			this.floor_queue = this.floor_queue.filter(n => n !== p.name);
+			this.notice(`${p.name} is sitting out, and won't take turns until someone @mentions them.`);
 		}
 
 		if (action === "leave") {
@@ -967,8 +992,11 @@ const room_prototype = {
 		this.paused = false;
 		this.awaiting_host = null;				// Decline the floor: the other models carry on.
 		if (this.quiet) {
-			this.quiet = false;					// Nudge: everyone may speak again, including the last speaker.
-			this.passed.clear();
+			this.quiet = false;					// Nudge: everyone may speak again, including the last speaker
+			this.passed.clear();				// and anyone sitting out.
+			for (let p of this.participants) {
+				p.sitting_out = false;
+			}
 			this.last_speaker = null;
 		}
 		this.emit_state();
@@ -982,6 +1010,7 @@ const room_prototype = {
 		}
 		this.floor_queue = [p.name].concat(this.floor_queue.filter(n => n !== p.name));
 		this.passed.delete(p.name);
+		p.sitting_out = false;
 		if (this.last_speaker === p.name) {
 			this.last_speaker = null;
 		}

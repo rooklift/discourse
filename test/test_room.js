@@ -87,9 +87,9 @@ function validate_request(req) {
 	}
 	assert.strictEqual(typeof req.system, "string");
 	let names = req.tools.map(t => t.name);
-	assert.deepStrictEqual(names.slice(0, 9), ["pass", "leave_room", "note_to_host", "room_status", "roll_dice", "shuffle", "calculate", "seal_envelope", "open_envelope"]);
+	assert.deepStrictEqual(names.slice(0, 10), ["pass", "leave_room", "sit_out", "note_to_host", "room_status", "roll_dice", "shuffle", "calculate", "seal_envelope", "open_envelope"]);
 	assert.strictEqual(new Set(names).size, names.length, "tool names are unique");
-	assert(names.length === 9 || names.length === 16, "either no file tools or all seven");
+	assert(names.length === 10 || names.length === 17, "either no file tools or all seven");
 }
 
 // A fake backend. script(name, req, n) returns a response (or throws). Records all requests.
@@ -2237,6 +2237,74 @@ test("system prompt: new tools, queued mentions, and that nothing is trimmed", (
 	assert(s.includes("room_status tells you how much is left"));
 	let absent = build_system_prompt(make_cfg({host_present: false, system_prompt: cfg.system_prompt}), cfg.participants[0]);
 	assert(absent.includes("note_to_host leaves them a note to read afterwards"));
+});
+
+test("sit_out: no turns until @mentioned; the others are told; the farewell round still includes them", async () => {
+	let backend = fake_backend((name, req, n) => {
+		if (name === "Haiku" && n === 0) {
+			return {content: [{type: "text", text: "I'll watch this one.", citations: null}, {type: "tool_use", id: "toolu_sit", name: "sit_out", input: {}}], stop_reason: "tool_use", usage: usage()};
+		}
+		if (name === "Opus" && n === 3) {
+			return speak("Haiku, want in? @Haiku");
+		}
+		return speak(`${name} ${n}`);
+	});
+	let room = new_room(make_cfg({first_speaker: "Haiku", max_turns: 10, farewell_round: true}), backend, {template: "x", random: () => 0});
+	room.host_say("Hello");
+	await room.run();
+
+	let order = turns(room).filter(e => !e.closing).map(e => e.author);
+	let back = order.indexOf("Haiku", 1);
+	assert.deepStrictEqual(order.slice(0, 8), ["Haiku", "Opus", "Sonnet", "Opus", "Sonnet", "Opus", "Sonnet", "Opus"], "no turns for Haiku while sitting out");
+	assert.strictEqual(order[8], "Haiku", "the @mention brought Haiku straight back");
+	assert(back === 8);
+	assert.strictEqual(turns(room)[0].text, "I'll watch this one.", "a message in the same reply is posted");
+	assert(room.log.some(e => e.kind === "notice" && e.text === "Haiku is sitting out, and won't take turns until someone @mentions them."));
+	let sonnet_view = JSON.stringify(backend.calls.filter(c => c.name === "Sonnet")[0].req.messages);
+	assert(sonnet_view.includes("Haiku is sitting out"), "the others are told");
+	let haiku_back = backend.calls.filter(c => c.name === "Haiku")[1].req.messages;
+	let catch_up = haiku_back[haiku_back.length - 1].content.map(b => b.text || "").join("");
+	assert(catch_up.includes("Opus 2") && catch_up.includes("Sonnet 2"), "on return, Haiku sees everything that happened meanwhile");
+	assert(turns(room).some(e => e.closing && e.author === "Haiku"), "farewell round includes everyone");
+
+	let r2 = new_room(make_cfg({host_present: true}), fake_backend(() => speak("x")), {template: "x"});
+	r2.participants[1].sitting_out = true;
+	assert(r2.status_for(r2.participants[0]).content.includes("Sitting out until mentioned: Sonnet."));
+	r2.host_give_floor("Sonnet");
+	assert.strictEqual(r2.participants[1].sitting_out, false, "/next brings a model back too");
+});
+
+test("sit_out: if everyone sits out, the room goes quiet; /resume brings them all back", async () => {
+	let backend = fake_backend((name, req, n) => n === 0
+		? {content: [{type: "tool_use", id: `toolu_s${name}`, name: "sit_out", input: {}}], stop_reason: "tool_use", usage: usage()}
+		: speak(`${name} ${n}`));
+	let room = new_room(make_cfg({host_present: true, max_turns: 6, farewell_round: false}), backend, {template: "x", random: () => 0});
+	room.host_say("Hello");
+	let run = room.run();
+	await until(() => room.quiet);
+	assert.strictEqual(turns(room).length, 3);
+	assert(room.participants.every(p => p.sitting_out));
+	room.host_resume();
+	await run;
+	assert(turns(room).length === 6 && turns(room).slice(3).every(e => e.action === "speak"));
+});
+
+test("open_envelope: several at once, with any that can't be opened reported", () => {
+	let {run_utility_tool, new_envelopes} = require("../src/utility_tools");
+	let envelopes = new_envelopes();
+	let run = (who, name, input) => run_utility_tool({name, input}, who, {envelopes});
+	run("Sol", "seal_envelope", {label: "a", content: "one"});
+	run("Sol", "seal_envelope", {label: "b", content: "two"});
+	run("Luna", "seal_envelope", {label: "c", content: "three"});
+	let r = run("Sol", "open_envelope", {numbers: [1, 2, 3, 1]});
+	assert(!r.is_error);
+	assert(r.content.includes("envelope #1 (\"a\")") && r.content.includes("It contained: two"));
+	assert(r.content.includes("Not opened: Envelope #3 is Luna's, and only they can open it."));
+	assert(r.announce.startsWith("Sol opened 2 envelopes: envelope #1"));
+	assert.strictEqual(envelopes.unopened("Luna").length, 1);
+	assert(run("Sol", "open_envelope", {numbers: [1]}).content.includes("already open"));
+	assert(run("Sol", "open_envelope", {numbers: []}).is_error);
+	assert(run("Luna", "open_envelope", {number: 3}).content.includes("three"), "the earlier single-number form still works");
 });
 
 // ------------------------------------------------------------------------------------------------

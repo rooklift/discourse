@@ -54,11 +54,11 @@ const UTILITY_TOOLS = [
 	},
 	{
 		name: "open_envelope",
-		description: "Open one of your own sealed envelopes, showing everyone what's inside.",
+		description: "Open one or more of your own sealed envelopes, showing everyone what's inside.",
 		input_schema: {
 			type: "object",
-			properties: {number: {type: "integer", description: "The envelope's number, given when you sealed it."}},
-			required: ["number"],
+			properties: {numbers: {type: "array", items: {type: "integer"}, description: "The envelope numbers, given when you sealed them, e.g. [3] or [3, 5, 8]."}},
+			required: ["numbers"],
 		},
 	},
 ];
@@ -163,12 +163,35 @@ function run_utility_tool(tool_use, actor_name, opts = {}) {
 					announce: `${actor_name} sealed envelope #${e.number}: "${e.label}".`,
 				};
 			}
-			let e = opts.envelopes.open(actor_name, input.number);
+			// Several at once: each valid one opens, and any that can't be opened are reported.
+			// (A lone "number" is accepted too, the tool's earlier form.)
+
+			let numbers = Array.isArray(input.numbers) ? input.numbers : (input.number !== undefined ? [input.number] : []);
+			if (numbers.length === 0) {
+				throw new Error("numbers must list at least one envelope number, e.g. [3].");
+			}
+			if (numbers.length > ENVELOPE_LIMITS.count) {
+				throw new Error(`numbers can list at most ${ENVELOPE_LIMITS.count} envelopes.`);
+			}
+			let opened = [];
+			let problems = [];
+			for (let n of [...new Set(numbers)]) {
+				try {
+					opened.push(opts.envelopes.open(actor_name, n));
+				} catch (error) {
+					problems.push(error.message);
+				}
+			}
+			if (opened.length === 0) {
+				throw new Error(problems.join(" "));
+			}
+			let lines = opened.map(describe_opened);
+			let failed = problems.length > 0 ? ` Not opened: ${problems.join(" ")}` : "";
 			return {
-				content: `You opened ${describe_opened(e)}. Everyone can see this.`,
+				content: `You opened ${lines.join("; and ")}. Everyone can see this.${failed}`,
 				is_error: false,
-				summary: `opened ${describe_opened(e)}`,
-				announce: `${actor_name} opened ${describe_opened(e)}`,
+				summary: `opened ${lines.join("; and ")}${failed ? ` (${failed.trim()})` : ""}`,
+				announce: opened.length === 1 ? `${actor_name} opened ${lines[0]}` : `${actor_name} opened ${opened.length} envelopes: ${lines.join("; and ")}`,
 			};
 		}
 

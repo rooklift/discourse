@@ -384,7 +384,7 @@ function handle_line(room, cfg, line) {
 		break;
 	case "/who":
 		for (let p of room.participants) {
-			print(`${p.name} (${p.cfg.full_name}): ${p.present ? "present" : "left"}, ${p.turns} turns, ${money(p.cost)}`);
+			print(`${p.name} (${p.cfg.full_name}): ${p.present ? (p.sitting_out ? "sitting out" : "present") : "left"}, ${p.turns} turns, ${money(p.cost)}`);
 		}
 		break;
 	case "/cost":
