@@ -121,6 +121,16 @@ function last_user_text(req) {
 	return last.content.filter(b => b.type === "text").map(b => b.text).join("\n");
 }
 
+// Builds a config's "models" object from a list of {name, ...settings}.
+
+function as_models(list) {
+	return Object.fromEntries(list.map(m => {
+		let settings = Object.assign({}, m);
+		delete settings.name;
+		return [m.name, settings];
+	}));
+}
+
 let tests = [];
 function test(name, fn) {
 	tests.push({name, fn});
@@ -1436,14 +1446,66 @@ test("config: with storage on, folders are named by model, so each model takes o
 	};
 	let opus = {name: "Opus", model: "claude-opus-5-5"};
 	let twin = {name: "Twin", model: "Claude-Opus-5-5"};
-	assert.throws(() => load({participants: [opus, twin]}), /Opus and Twin are both Claude-Opus-5-5/);
-	assert.strictEqual(load({storage_dir: "", participants: [opus, twin]}).participants.length, 2, "fine with storage off");
-	assert.throws(() => load({participants: [opus, {name: "X", model: "../escape"}]}), /can't be used as a storage folder name/);
-	assert.throws(() => load({participants: [opus, {name: "X", model: "shared"}]}), /can't be used as a storage folder name/);
-	assert.strictEqual(load({participants: [opus, {name: "Shared", model: "claude-haiku-5-5"}]}).participants[1].name, "Shared", "a participant may be called Shared now");
+	assert.throws(() => load({models: as_models([opus, twin])}), /Opus and Twin are both Claude-Opus-5-5/);
+	assert.strictEqual(load({storage_dir: "", models: as_models([opus, twin])}).participants.length, 2, "fine with storage off");
+	assert.throws(() => load({models: as_models([opus, {name: "X", model: "../escape"}])}), /can't be used as a storage folder name/);
+	assert.throws(() => load({models: as_models([opus, {name: "X", model: "shared"}])}), /can't be used as a storage folder name/);
+	assert.strictEqual(load({models: as_models([opus, {name: "Shared", model: "claude-haiku-5-5"}])}).participants[1].name, "Shared", "a participant may be called Shared now");
 
-	fs.writeFileSync(cfg_path, JSON.stringify({api_key_file: key, participants: [opus, {name: "Haiku", model: "claude-haiku-5-5"}]}));
+	fs.writeFileSync(cfg_path, JSON.stringify({api_key_file: key, models: as_models([opus, {name: "Haiku", model: "claude-haiku-5-5"}])}));
 	assert.throws(() => load_config(cfg_path), /"api_key_file" has been renamed "anthropic_api_key_file"/);
+});
+
+test("config: models are keyed by name, and only the active ones are seated", () => {
+	let {load_config, read_api_keys} = require("../src/config");
+	let dir = temp_dir();
+	fs.writeFileSync(path.join(dir, "a.txt"), "akey");
+	let file = path.join(dir, "config.json");
+	let load = (obj, opts) => {
+		fs.writeFileSync(file, JSON.stringify(Object.assign({anthropic_api_key_file: "a.txt"}, obj)));
+		return load_config(file, opts);
+	};
+	let models = {
+		Opus: {model: "claude-opus-5-5", full_name: "Claude Opus 5.5"},
+		Sonnet: {model: "claude-sonnet-5-5"},
+		Haiku: {model: "claude-haiku-5-5"},
+		Sol: {model: "gpt-6.1-sol"},				// No OpenAI key file: fine while Sol isn't seated.
+		Argon: {model: "gemini-4-argon"},
+	};
+
+	let cfg = load({models, active: ["Sonnet", "opus"], first_speaker: "OPUS"});
+	assert.deepStrictEqual(cfg.participants.map(p => p.name), ["Sonnet", "Opus"], "in the order listed, names matched case-insensitively");
+	assert.deepStrictEqual(cfg.active, ["Sonnet", "Opus"]);
+	assert.strictEqual(cfg.first_speaker, "Opus");
+	assert.strictEqual(cfg.participants[1].full_name, "Claude Opus 5.5");
+	assert.deepStrictEqual(read_api_keys(cfg), {anthropic: "akey"}, "keys are read only for the seated models");
+
+	assert.deepStrictEqual(load({models, active: ["Haiku", "Opus"]}, {active: ["Opus", "Sonnet", "Haiku"]}).participants.map(p => p.name),
+		["Opus", "Sonnet", "Haiku"], "the CLI's --active overrides the config's");
+
+	let all_claude = {Opus: models.Opus, Sonnet: models.Sonnet, Haiku: models.Haiku};
+	assert.strictEqual(load({models: all_claude}).participants.length, 3, "no active list seats everyone");
+
+	assert.throws(() => load({models, active: ["Opus", "Sol"]}), /Sol is a model from OpenAI, so the config needs "openai_api_key_file"/);
+	assert.throws(() => load({models, active: ["Opus", "Nobody"]}), /"Nobody" is in "active" but not in "models"/);
+	assert.throws(() => load({models, active: ["Opus"]}), /at least two active models/);
+	assert.throws(() => load({models, active: ["Opus", "OPUS"]}), /listed twice/);
+	assert.throws(() => load({models, active: ["Opus", "Sonnet"], first_speaker: "Haiku"}), /first_speaker "Haiku" isn't one of the active models/);
+	assert.throws(() => load({models: Object.assign({}, models, {Bad: {model: "claude-haiku-5-5", effort: "loud"}}), active: ["Opus", "Sonnet"]}),
+		/Bad: effort must be one of/, "inactive models are still checked, so typos show up");
+	assert.throws(() => load({models: Object.assign({}, models, {Bad: {model: "x", tokens: 5}}), active: ["Opus", "Sonnet"]}), /Unknown key "tokens" in models.Bad/);
+	assert.throws(() => load({models: Object.assign({}, models, {Dup: {model: "x", name: "Dup"}}), active: ["Opus", "Sonnet"]}), /Unknown key "name" in models.Dup/);
+	assert.throws(() => load({models: [{name: "Opus", model: "claude-opus-5-5"}]}), /"models" should be an object/);
+	fs.writeFileSync(file, JSON.stringify({anthropic_api_key_file: "a.txt", participants: [{name: "Opus", model: "claude-opus-5-5"}]}));
+	assert.throws(() => load_config(file), /"participants" has been replaced by "models"/);
+});
+
+test("the example config loads, seating only Claude models, so it needs only an Anthropic key", () => {
+	let {load_config, read_api_keys} = require("../src/config");
+	let cfg = load_config(path.join(__dirname, "..", "config.json.example"));
+	assert.deepStrictEqual(cfg.participants.map(p => [p.name, p.provider]), [["Opus", "anthropic"], ["Sonnet", "anthropic"], ["Haiku", "anthropic"]]);
+	assert.deepStrictEqual(Object.keys(cfg.models), ["Opus", "Sonnet", "Haiku", "Gemini", "Sol"]);
+	assert(cfg.participants.every(p => p.price_tiers), "every seated model has prices");
 });
 
 test("storage: a model keeps its folder under any room name, and the prompt says so", () => {
@@ -1830,19 +1892,19 @@ test("config: providers, key files, efforts and companies per participant", () =
 	let gem = {name: "Gemini", model: "gemini-3.8-flash", effort: "minimal"};
 	let opus = {name: "Opus", model: "claude-opus-5-5"};
 
-	let cfg = load_config(write({google_api_key_file: "g.txt", budget: 1, participants: [gem, Object.assign({}, gem, {name: "Argon", model: "gemini-4-argon", effort: ""})]}));
+	let cfg = load_config(write({google_api_key_file: "g.txt", budget: 1, models: as_models([gem, Object.assign({}, gem, {name: "Argon", model: "gemini-4-argon", effort: ""})])}));
 	assert.deepStrictEqual(cfg.participants.map(p => [p.provider, p.company]), [["google", "Google"], ["google", "Google"]]);
 	assert.deepStrictEqual(read_api_keys(cfg), {google: "gkey"}, "no Anthropic key needed for an all-Gemini room");
 
-	cfg = load_config(write({anthropic_api_key_file: "a.txt", google_api_key_file: "g.txt", participants: [opus, gem]}));
+	cfg = load_config(write({anthropic_api_key_file: "a.txt", google_api_key_file: "g.txt", models: as_models([opus, gem])}));
 	assert.deepStrictEqual(read_api_keys(cfg), {anthropic: "akey", google: "gkey"});
 	assert.strictEqual(cfg.participants[0].company, "Anthropic");
 
-	assert.throws(() => load_config(write({anthropic_api_key_file: "a.txt", participants: [opus, gem]})), /needs "google_api_key_file"/);
-	assert.throws(() => load_config(write({google_api_key_file: "g.txt", participants: [opus, gem]})), /Opus is a model from Anthropic, so the config needs "anthropic_api_key_file"/);
-	assert.throws(() => load_config(write({anthropic_api_key_file: "a.txt", google_api_key_file: "g.txt", participants: [Object.assign({}, opus, {effort: "minimal"}), gem]})), /effort must be one of/);
-	assert.throws(() => load_config(write({anthropic_api_key_file: "a.txt", google_api_key_file: "g.txt", participants: [opus, Object.assign({}, gem, {effort: "max"})]})), /effort must be one of/);
-	assert.throws(() => load_config(write({anthropic_api_key_file: "a.txt", participants: [opus, {name: "X", model: "claude-haiku-5-5", provider: "mistral"}]})), /provider must be one of/);
+	assert.throws(() => load_config(write({anthropic_api_key_file: "a.txt", models: as_models([opus, gem])})), /needs "google_api_key_file"/);
+	assert.throws(() => load_config(write({google_api_key_file: "g.txt", models: as_models([opus, gem])})), /Opus is a model from Anthropic, so the config needs "anthropic_api_key_file"/);
+	assert.throws(() => load_config(write({anthropic_api_key_file: "a.txt", google_api_key_file: "g.txt", models: as_models([Object.assign({}, opus, {effort: "minimal"}), gem])})), /effort must be one of/);
+	assert.throws(() => load_config(write({anthropic_api_key_file: "a.txt", google_api_key_file: "g.txt", models: as_models([opus, Object.assign({}, gem, {effort: "max"})])})), /effort must be one of/);
+	assert.throws(() => load_config(write({anthropic_api_key_file: "a.txt", models: as_models([opus, {name: "X", model: "claude-haiku-5-5", provider: "mistral"}])})), /provider must be one of/);
 });
 
 test("pricing: Gemini prices, including the scheduled rises", () => {
@@ -2048,7 +2110,7 @@ test("pricing and config: OpenAI models", () => {
 	let dir = temp_dir();
 	fs.writeFileSync(path.join(dir, "o.txt"), "okey");
 	fs.writeFileSync(path.join(dir, "config.json"), JSON.stringify({openai_api_key_file: "o.txt",
-		participants: [{name: "Sol", model: "gpt-6.1-sol", effort: "xhigh"}, {name: "Luna", model: "gpt-6-luna", effort: "none"}]}));
+		models: as_models([{name: "Sol", model: "gpt-6.1-sol", effort: "xhigh"}, {name: "Luna", model: "gpt-6-luna", effort: "none"}])}));
 	let cfg = load_config(path.join(dir, "config.json"));
 	assert.deepStrictEqual(cfg.participants.map(p => [p.provider, p.company]), [["openai", "OpenAI"], ["openai", "OpenAI"]]);
 	assert.deepStrictEqual(read_api_keys(cfg), {openai: "okey"});

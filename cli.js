@@ -13,7 +13,7 @@
 // --image (or -i) attaches an image to the opening message, and --file (or -f) a text file.
 // Both can be given more than once.
 
-const USAGE = "Usage: node cli.js [--config path/to/config.json] [--random[=N]] [--image path]... [--file path]... [opening message...]";
+const USAGE = "Usage: node cli.js [--config path/to/config.json] [--active Name,Name,...] [--random[=N]] [--image path]... [--file path]... [opening message...]";
 const PASTE_MS = 40;						// Lines arriving closer together than this are a paste, not typing.
 const DEFAULT_RANDOM_WORDS = 5;
 
@@ -89,7 +89,7 @@ function provider_split(room) {
 
 function parse_args(argv) {
 
-	let opts = {config: path.join(__dirname, "config.json"), message: "", random: 0, images: [], files: []};
+	let opts = {config: path.join(__dirname, "config.json"), active: null, message: "", random: 0, images: [], files: []};
 	let words = [];
 
 	for (let i = 0; i < argv.length; i++) {
@@ -109,6 +109,11 @@ function parse_args(argv) {
 				throw new Error(`${arg} needs a path`);
 			}
 			opts.config = argv[++i];
+		} else if (arg === "--active" || arg === "-a") {
+			if (i + 1 >= argv.length) {
+				throw new Error(`${arg} needs a list of names, e.g. Opus,Sonnet,Luna`);
+			}
+			opts.active = argv[++i].split(",").map(n => n.trim()).filter(Boolean);
 		} else if (arg === "--image" || arg === "-i") {
 			if (i + 1 >= argv.length) {
 				throw new Error(`${arg} needs a path`);
@@ -145,7 +150,7 @@ async function main() {
 			console.log(USAGE);
 			process.exit(0);
 		}
-		cfg = load_config(opts.config);
+		cfg = load_config(opts.config, {active: opts.active});
 		api_keys = read_api_keys(cfg);
 		if (opts.message) {
 			cfg.opening_message = opts.message;

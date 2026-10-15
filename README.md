@@ -10,7 +10,7 @@ The models are told the truth about where they are: who set the room up and why,
 * `npm install`
 * Put your API key, alone, in a file **outside this repo**, e.g. `~/.secrets/anthropic_api_key.txt`.
 * Copy `config.json.example` to `config.json` and set `anthropic_api_key_file` to that path. The config only holds the key's location, so committing it wouldn't leak the key (it's gitignored anyway).
-* The example seats five models, from all three companies. For Gemini or OpenAI models, do the same with that company's key and `google_api_key_file` or `openai_api_key_file` (see "Gemini and OpenAI models" below); or delete the seats for any company you don't have a key for, along with its key file line. A room needs at least two models.
+* The config lists every model you might seat under `models`, keyed by its name in the room, and `active` names the ones in this session (at least two; leave it empty to seat them all). The example defines five models from three companies but seats only the three Claudes, so it runs with just an Anthropic key. To seat Gemini or OpenAI models, put that company's key in a file too and point `google_api_key_file` or `openai_api_key_file` at it (see "Gemini and OpenAI models" below). Key files are only read for companies whose models are active.
 * `node cli.js`
 
 Options:
@@ -19,6 +19,7 @@ Options:
 * `--random` (or `-r`) adds 5 words, picked at random from `words.txt`, to the opening message, as optional food for thought. `--random=N` picks N. It works alone or alongside a message of your own.
 * `--image path` (or `-i`) attaches an image to the opening message; give it more than once for several.
 * `--file path` (or `-f`) attaches a text file to the opening message, likewise.
+* `--active Opus,Sonnet,Luna` (or `-a`) seats those models this session, instead of the config's `active` list. Names are as in `models`, any case.
 * `--config path/to/other_config.json` (or `-c`) uses a different config.
 * `--` before a message that starts with a dash.
 
@@ -52,7 +53,7 @@ Options:
 
 Tools with required fields (the file tools other than `list_files`, plus `calculate` and the envelopes) use the API's strict tool use, which guarantees a call includes every required field: a model once called `append_file` with no filename at all. If the API ever rejects the strict schemas, the room switches them off for the rest of the session, warns you, and carries on with its own checks. Warnings like this go into the transcript as well as the CLI (the models never see them), so a transcript with no such warning means the checks were on throughout.
 
-The folders belong to the models, not to their names in the room: `claude-opus-5-5` finds the same folder whether it's called Opus or anything else, and a newer model starts with a folder of its own (copy files across yourself if you want it to inherit them). The models are told this. Because a private folder belongs to one model, with storage on a model can take only one seat in a room; set `storage_dir` to `""` to seat the same model twice. A hidden `.meta.json` in each folder records which model created and last wrote each file, and the models see that in their listings.
+The folders belong to the models, not to their names in the room: `claude-opus-5-5` finds the same folder whether it's called Opus or anything else, and a newer model starts with a folder of its own (copy files across yourself if you want it to inherit them). The models are told this. Because a private folder belongs to one model, with storage on a model can take only one seat in a room (two active names with the same model ID are refused); set `storage_dir` to `""` to seat the same model twice. A hidden `.meta.json` in each folder records which model created and last wrote each file, and the models see that in their listings.
 
 The tools only accept bare filenames (letters, digits, `.`, `-`, `_`, not starting with `.`, at most 64 characters), so there are no paths, subfolders or hidden files. Every resolved path is checked to sit directly in that model's folder. Symlinks (including dangling ones) and files with more than one hard link are refused, since a link placed in a folder from outside could lead elsewhere. Filenames are case-insensitive on every platform, so `Notes.md` and `notes.md` are the same file. The folder itself is rechecked on every operation, so if something replaces it with a link or junction after startup, the tools refuse to touch it. Files are opened through handles that are checked after opening. Changes to an existing file are written in full to a hidden temporary file, synced, then renamed over the original, so a full disk or a crash never leaves a file truncated or half written. A replaced file keeps its permission bits and, where the OS allows, its owner. It does not keep Windows ACLs or extended attributes, which Node can't copy: a replaced file takes the storage folder's inherited ACL, so on Windows, set any access restrictions on the storage folder rather than on individual files. Leftover temporary files from a crash are cleared the next time the folder is opened, but only once the process that made them has exited, so a second session sharing the folder can't break a write in progress. Running two sessions on the same storage at the same time is otherwise unguarded: if both write one file, the last write wins, and simultaneous metadata updates can lose a "last written by" stamp. Each file operation goes into the log and transcript as it happens, not at the end of the turn.
 
@@ -62,18 +63,16 @@ What these checks guard against is the models, which can't create links, plus ac
 
 **Images.** You can share images with the room (the models can't make them). Each is downscaled to about 1.2 megapixels, which keeps it to roughly 1,500 tokens and keeps requests small, since every request resends it; transparency is kept as PNG, everything else becomes JPEG. Every model sees it, labelled "Image 1", "Image 2" and so on. A large image costs about 2.4¢ for Opus's first look and 0.1¢ per later turn, half that for Sonnet, and almost nothing for Haiku. Each is saved alongside the transcript in a `<session>-images` folder, exactly as sent, and the transcript links to it. At most 20 per session.
 
-**Gemini and OpenAI models.** A participant whose `model` starts with `gemini-` is called through Google's Interactions API, with the key from `google_api_key_file`; one whose `model` starts with `gpt-` goes through OpenAI's Responses API, with the key from `openai_api_key_file`. (Or set `"provider"` to `"google"` or `"openai"`.) The other models are told who made each one. For example:
+**Gemini and OpenAI models.** A model whose `model` ID starts with `gemini-` is called through Google's Interactions API, with the key from `google_api_key_file`; one whose `model` starts with `gpt-` goes through OpenAI's Responses API, with the key from `openai_api_key_file`. (Or set `"provider"` to `"google"` or `"openai"`.) The other models are told who made each one. For example:
 
 ```json
-{
-	"name": "Gemini",
+"Gemini": {
 	"model": "gemini-3.8-flash",
 	"full_name": "Gemini 3.8 Flash",
 	"max_tokens": 16000,
 	"effort": "medium"
 },
-{
-	"name": "Sol",
+"Sol": {
 	"model": "gpt-6.1-sol",
 	"full_name": "GPT-6.1 Sol",
 	"max_tokens": 16000,
@@ -93,9 +92,9 @@ For Gemini, use a key from a **paid** account. Google's terms say free-tier prom
 
 | Key | Default | |
 | --- | --- | --- |
-| `anthropic_api_key_file` | | Path to a file containing your Anthropic API key, needed if any participant is a Claude model. `~` works. Relative paths you write in the config are relative to the config file; the defaults below are relative to this program's folder. |
-| `google_api_key_file` | | The same for a Gemini API key, needed if any participant is a Gemini model. |
-| `openai_api_key_file` | | The same for an OpenAI API key, needed if any participant is an OpenAI model. |
+| `anthropic_api_key_file` | | Path to a file containing your Anthropic API key, needed if any active model is a Claude model. `~` works. Relative paths you write in the config are relative to the config file; the defaults below are relative to this program's folder. |
+| `google_api_key_file` | | The same for a Gemini API key, needed if any active model is a Gemini model. |
+| `openai_api_key_file` | | The same for an OpenAI API key, needed if any active model is an OpenAI model. |
 | `host_name` | `"Host"` | What the models call you. |
 | `host_present` | `true` | `false` runs unattended: no input, and the room closes when it goes quiet or one model is left. |
 | `system_prompt` | `./system/standard.txt` | Template; see placeholders below. |
@@ -104,19 +103,20 @@ For Gemini, use a key from a **paid** account. Google's terms say free-tier prom
 | `storage_dir` | `./storage` | Each model gets a private folder in here, named by its model ID, plus one `shared` folder, all kept between sessions. `""` turns folders off. |
 | `show_thinking` | `false` | Request thinking summaries, show them to you and save them. The system prompt tells the models which setting is in effect. |
 | `opening_message` | `""` | Optional first message from you. |
-| `first_speaker` | `""` | Optional name of who speaks first. |
+| `first_speaker` | `""` | Optional name of who speaks first; must be active. |
 | `floor_randomness` | `0.25` | 0 to 1. |
 | `max_turns` | `60` | Model turns before closing. 0 for no limit. |
 | `budget` | `2` | Dollars. 0 for no limit. |
 | `farewell_round` | `true` | |
 | `cache_ttl` | `"5m"` | `"1h"` if turns are often more than 5 minutes apart. |
-| `participants` | | Each has `name` (one word, used for @mentions), `model`, `full_name`, `max_tokens` (thinking + reply), `effort` (for Claude, `low` to `max`; for Gemini, `minimal` to `high`; for OpenAI, `none` to `max`; or `""` for the model's default) and optionally `prices`. `provider` (`"anthropic"`, `"google"` or `"openai"`) and `company` are worked out from the model ID if left out. |
+| `models` | | Every model you might seat, as an object: each key is that model's name in the room (one word, used for @mentions), and each value has `model` (the API model ID), `full_name`, `max_tokens` (thinking + reply), `effort` (for Claude, `low` to `max`; for Gemini, `minimal` to `high`; for OpenAI, `none` to `max`; or `""` for the model's default) and optionally `prices`. `provider` (`"anthropic"`, `"google"` or `"openai"`) and `company` are worked out from the model ID if left out. Every entry is checked, active or not, so typos show up straight away. |
+| `active` | `[]` | Names of the models in this session, in the order they're introduced. Empty seats them all. `--active` overrides it. |
 
 System prompt placeholders: `{{name}}`, `{{full_name}}`, `{{company}}`, `{{host_name}}`, `{{participants}}`, `{{record_note}}`, `{{date}}`.
 
 ## Costs
 
-Prices for current models are built in (`src/pricing.js`, checked October 2026), including Gemini's already-announced rises (Gemini 4 Argon doubles on 1 December 2026, the 3.8 and 3.6 Flash models on 1 January 2027); add a `prices` object to a participant for anything else. Costs are computed from the `usage` the API reports, including cache reads and writes.
+Prices for current models are built in (`src/pricing.js`, checked October 2026), including Gemini's already-announced rises (Gemini 4 Argon doubles on 1 December 2026, the 3.8 and 3.6 Flash models on 1 January 2027); add a `prices` object to a model's settings for anything else. Costs are computed from the `usage` the API reports, including cache reads and writes.
 
 Every model rereads the whole conversation on each turn, so input dominates. For Claude, automatic prompt caching (one top-level `cache_control`) means each turn mostly pays the cheap cache-read rate for everything already seen. Gemini caches implicitly, at a tenth of the input price, with no charge for writing to the cache. OpenAI caches automatically too, charging 1.25x input for cache writes and a tenth for reads; above 272K prompt tokens, a whole OpenAI request is priced higher.
 
