@@ -77,6 +77,16 @@ function money(n) {
 	return "$" + n.toFixed(4);
 }
 
+// " (Anthropic $0.4732, Google $0.2066)" when more than one provider is in the room, else "".
+
+function provider_split(room) {
+	let groups = room.cost_by_provider();
+	if (groups.length < 2) {
+		return "";
+	}
+	return ` (${groups.map(g => `${g.company} ${money(g.cost)}${g.known ? "" : " incomplete"}`).join(", ")})`;
+}
+
 function parse_args(argv) {
 
 	let opts = {config: path.join(__dirname, "config.json"), message: "", random: 0, images: [], files: []};
@@ -235,7 +245,7 @@ async function main() {
 	});
 
 	room.on("closed", () => {
-		print(dim(`Total cost: ${money(room.total_cost)}${room.cost_known ? "" : " (incomplete)"}`));
+		print(dim(`Total cost: ${money(room.total_cost)}${room.cost_known ? "" : " (incomplete)"}${provider_split(room)}`));
 		print(dim(`Transcript: ${files.md_path}`));
 		if (rl) {
 			rl.close();
@@ -359,7 +369,7 @@ function handle_line(room, cfg, line) {
 		}
 		break;
 	case "/cost":
-		print(`Total: ${money(room.total_cost)}${room.cost_known ? "" : " (incomplete)"} of ${cfg.budget > 0 ? money(cfg.budget) : "unlimited"}`);
+		print(`Total: ${money(room.total_cost)}${room.cost_known ? "" : " (incomplete)"} of ${cfg.budget > 0 ? money(cfg.budget) : "unlimited"}${provider_split(room)}`);
 		break;
 	case "/end":
 		room.host_end();

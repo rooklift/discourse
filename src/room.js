@@ -13,6 +13,7 @@
 
 const EventEmitter = require("events");
 const pricing = require("./pricing");
+const {PROVIDERS} = require("./config");
 const {build_system_prompt} = require("./prompt");
 const {new_storage, make_file_tools, FILE_TOOL_NAMES, run_file_tool, LIMITS} = require("./storage");
 const {UTILITY_TOOLS, UTILITY_TOOL_NAMES, run_utility_tool, new_envelopes, describe_opened} = require("./utility_tools");
@@ -83,6 +84,7 @@ function new_room(cfg, backend, opts = {}) {
 				last_spoke: -1,						// Value of message_count when this model last spoke.
 				turns: 0,
 				cost: 0,
+				cost_known: true,
 				usage: {input: 0, cache_read: 0, cache_write: 0, output: 0},
 			};
 		}),
@@ -161,6 +163,24 @@ const room_prototype = {
 	get_participant: function(name) {
 		let lower = String(name).toLowerCase();
 		return this.participants.find(p => p.name.toLowerCase() === lower) || null;
+	},
+
+	// Spending per provider, in the order they first appear in the config:
+	// [{provider, company, cost, known}].
+
+	cost_by_provider: function() {
+		let groups = [];
+		for (let p of this.participants) {
+			let provider = p.cfg.provider || "anthropic";
+			let g = groups.find(g => g.provider === provider);
+			if (!g) {
+				g = {provider, company: PROVIDERS[provider]?.company || provider, cost: 0, known: true};
+				groups.push(g);
+			}
+			g.cost += p.cost;
+			g.known = g.known && p.cost_known;
+		}
+		return groups;
 	},
 
 	present_models: function() {
@@ -570,6 +590,7 @@ const room_prototype = {
 		p.usage.output += usage.output_tokens || 0;
 		if (cost === null) {
 			this.cost_known = false;
+			p.cost_known = false;
 		} else {
 			p.cost += cost;
 			this.total_cost += cost;

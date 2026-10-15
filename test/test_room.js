@@ -1769,6 +1769,10 @@ test("gemini in the room: a tool step and a later turn replay Gemini's steps exa
 	assert.strictEqual(t[0].text, "It's 42, @Opus.");
 	assert.deepStrictEqual(t[0].thinking, ["Let me check."], "thought summaries reach the host's record");
 	assert(room.participants[1].cost > 0, "Gemini's usage is priced");
+	let groups = room.cost_by_provider();
+	assert.deepStrictEqual(groups.map(g => [g.provider, g.company, g.known]), [["anthropic", "Anthropic", true], ["google", "Google", true]]);
+	assert.strictEqual(groups[1].cost, room.participants[1].cost);
+	assert(Math.abs(groups[0].cost + groups[1].cost - room.total_cost) < 1e-12, "the split adds up to the total");
 	let opus_view = claude.calls[0].req.messages;
 	assert(!JSON.stringify(opus_view).includes("OPAQUE=="), "Gemini's reasoning never reaches the other models");
 	assert(!JSON.stringify(opus_view).includes("native"));
