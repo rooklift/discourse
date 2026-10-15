@@ -10,7 +10,7 @@ The models are told the truth about where they are: who set the room up and why,
 * `npm install`
 * Put your API key, alone, in a file **outside this repo**, e.g. `~/.secrets/anthropic_api_key.txt`.
 * Copy `config.json.example` to `config.json` and set `anthropic_api_key_file` to that path. The config only holds the key's location, so committing it wouldn't leak the key (it's gitignored anyway).
-* For Gemini or OpenAI models, do the same with that company's key and `google_api_key_file` or `openai_api_key_file`. See "Gemini and OpenAI models" below.
+* The example seats five models, from all three companies. For Gemini or OpenAI models, do the same with that company's key and `google_api_key_file` or `openai_api_key_file` (see "Gemini and OpenAI models" below); or delete the seats for any company you don't have a key for, along with its key file line. A room needs at least two models.
 * `node cli.js`
 
 Options:

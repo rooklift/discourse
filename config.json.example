@@ -1,7 +1,7 @@
 {
 	"anthropic_api_key_file": "~/.secrets/anthropic_api_key.txt",
-	"google_api_key_file": "",
-	"openai_api_key_file": "",
+	"google_api_key_file": "~/.secrets/gemini_api_key.txt",
+	"openai_api_key_file": "~/.secrets/openai_api_key.txt",
 	"host_name": "Host",
 	"host_present": true,
 	"system_prompt": "./system/standard.txt",
@@ -35,6 +35,20 @@
 			"name": "Haiku",
 			"model": "claude-haiku-5-5",
 			"full_name": "Claude Haiku 5.5",
+			"max_tokens": 16000,
+			"effort": "medium"
+		},
+		{
+			"name": "Gemini",
+			"model": "gemini-3.8-flash",
+			"full_name": "Gemini 3.8 Flash",
+			"max_tokens": 16000,
+			"effort": "medium"
+		},
+		{
+			"name": "Sol",
+			"model": "gpt-6.1-sol",
+			"full_name": "GPT-6.1 Sol",
 			"max_tokens": 16000,
 			"effort": "medium"
 		}
