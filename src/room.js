@@ -104,6 +104,7 @@ function new_room(cfg, backend, opts = {}) {
 				system: build_system_prompt(cfg, p, opts.template ?? null, storage_info),
 				present: true,
 				last_spoke: -1,						// Value of message_count when this model last spoke.
+				last_floor: -1,						// Value of floor_count when this model last had the floor (spoke, passed or failed).
 				turns: 0,
 				cost: 0,
 				cost_known: true,
@@ -117,6 +118,7 @@ function new_room(cfg, backend, opts = {}) {
 		passed: new Set(),						// Names who passed (or failed) since the last message.
 		last_speaker: null,						// Name of whoever sent the last message, host included.
 		message_count: 0,
+		floor_count: 0,							// Turns taken, passes and failures included; drives the rotation.
 
 		turn_count: 0,							// Completed model turns (not counting failed requests).
 		total_cost: 0,
@@ -385,8 +387,11 @@ const room_prototype = {
 			return eligible[Math.floor(this.random() * eligible.length)];
 		}
 
-		let quietest = Math.min(...eligible.map(p => p.last_spoke));
-		let candidates = eligible.filter(p => p.last_spoke === quietest);
+		// Whoever has gone longest without the floor. Passing counts as having had it, or a model
+		// that passes before it has spoken would be picked again after every message.
+
+		let longest = Math.min(...eligible.map(p => p.last_floor));
+		let candidates = eligible.filter(p => p.last_floor === longest);
 		return candidates[Math.floor(this.random() * candidates.length)];
 	},
 
@@ -608,7 +613,12 @@ const room_prototype = {
 		this.emit_state();
 	},
 
+	note_floor: function(p) {
+		p.last_floor = ++this.floor_count;
+	},
+
 	on_error: function(p, error, partial) {
+		this.note_floor(p);
 		if (!partial) {
 			this.consecutive_errors++;
 			this.passed.add(p.name);			// So the floor moves on.
@@ -790,6 +800,7 @@ const room_prototype = {
 
 		p.turns++;
 		this.turn_count++;
+		this.note_floor(p);
 
 		let text = steps.map(s => s.text.trim()).filter(Boolean).join("\n\n");
 		let leave = steps.map(s => s.leave).find(Boolean) || null;

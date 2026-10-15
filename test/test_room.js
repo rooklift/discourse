@@ -187,6 +187,21 @@ test("when the model asked to start passes, the others are told it already went"
 	assert(seen.includes("<notice>Haiku passed.</notice>"), "the next model knows Haiku's turn already happened");
 });
 
+test("a model that passes isn't handed the floor again after every message", async () => {
+	// Argon's report: Sonnet passed before ever speaking, so it stayed the "quietest" and was
+	// picked after every single message.
+	let backend = fake_backend((name, req, n) => name === "Sonnet" ? pass() : speak(`${name} ${n}`));
+	let room = new_room(make_cfg({max_turns: 10, farewell_round: false}), backend, {template: "x", random: () => 0});
+	room.participants.push(Object.assign({}, room.participants[2], {name: "Luna", turns: 0, last_spoke: -1, last_floor: -1, present: true}));
+	await room.run();
+	let order = turns(room).map(e => e.author);
+	let sonnet = order.map((a, i) => a === "Sonnet" ? i : -1).filter(i => i >= 0);
+	for (let i = 1; i < sonnet.length; i++) {
+		assert(sonnet[i] - sonnet[i - 1] >= 3, `Sonnet should wait for the others between turns: ${order.join(", ")}`);
+	}
+	assert.deepStrictEqual(order.slice(0, 4).sort(), ["Haiku", "Luna", "Opus", "Sonnet"], "everyone gets a turn before anyone gets a second");
+});
+
 test("@mentions give the floor to the mentioned model next", async () => {
 	let backend = fake_backend((name, req, n) => {
 		if (name === "Opus" && n === 0) return speak("What do you think, @haiku?");
@@ -1645,14 +1660,13 @@ test("a turn stops after the step limit, and the room carries on", async () => {
 		if (name === "Opus") return file_step(tool("list_files", {}));
 		return speak(`${name} ${n}`);
 	});
-	let room = new_room(make_cfg({storage_dir: temp_dir(), max_turns: 3, farewell_round: false}), backend, {template: "x", random: () => 0});
+	let room = new_room(make_cfg({storage_dir: temp_dir(), max_turns: 4, farewell_round: false}), backend, {template: "x", random: () => 0});
 	await room.run();
 	let t = turns(room);
 	assert.strictEqual(t[0].steps.length, 10);
 	assert.strictEqual(t[0].limit_note, "stopped after 10 steps");
 	assert.strictEqual(t[0].action, "silent");
-	assert.strictEqual(t.length, 3, "the room carried on");
-	assert.strictEqual(t[1].author, "Sonnet");
+	assert.deepStrictEqual(t.map(e => e.author), ["Opus", "Sonnet", "Haiku", "Opus"], "the room carried on, in rotation");
 	let opus_after = backend.calls.filter(c => c.name === "Opus")[10];
 	assert(opus_after, "Opus was asked again, with all 10 steps replayed in a valid request");
 	assert.strictEqual(opus_after.req.messages.filter(m => m.role === "assistant").length, 10);
