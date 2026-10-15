@@ -2,7 +2,8 @@
 
 // Tools that aren't about files: dice and shuffling (real randomness, announced to everyone so
 // games stay fair), a calculator (private, like thinking), and sealed envelopes (a secret the room
-// keeps unchanged until its owner opens it, for games with hidden information).
+// keeps unchanged until it's opened, for games with hidden information). Anyone can open an
+// envelope, so a round's bids can all be revealed in one call, unless its sealer made it private.
 
 const crypto = require("crypto");
 const {calculate, NAMES_HELP} = require("./calc");
@@ -42,22 +43,23 @@ const UTILITY_TOOLS = [
 	},
 	{
 		name: "seal_envelope",
-		description: "Seal a secret in an envelope that the room keeps for you: a number to guess, a prediction, a hidden role. Everyone is told you sealed it, and its label, but not what's inside, and the room guarantees the contents can't change. Only you can open it, with open_envelope, which shows everyone what was inside. If you leave the room, your unopened envelopes are opened for everyone. Envelopes last for this session only.",
+		description: "Seal a secret in an envelope that the room keeps: a bid, a number to guess, a prediction. Everyone is told you sealed it, and its label, but not what's inside, and the room guarantees the contents can't change. By default anyone can open it with open_envelope, which shows everyone what was inside, so when everyone has sealed, one person can reveal them all at once. Set private if only you should be able to open it, for example a prediction to reveal yourself later; if you leave the room, your private envelopes are opened for everyone. Envelopes last for this session only.",
 		input_schema: {
 			type: "object",
 			properties: {
-				label: {type: "string", description: "A short public label, e.g. \"my number\". Everyone sees this."},
-				content: {type: "string", description: "The secret. The other models don't see this until you open the envelope (the host's records do include it)."},
+				label: {type: "string", description: "A short public label, e.g. \"round 2 bid\". Everyone sees this."},
+				content: {type: "string", description: "The secret. The other models don't see this until the envelope is opened (the host's records do include it)."},
+				private: {type: "boolean", description: "Optional. If true, only you can open it. Default false: anyone can."},
 			},
 			required: ["label", "content"],
 		},
 	},
 	{
 		name: "open_envelope",
-		description: "Open one or more of your own sealed envelopes, showing everyone what's inside.",
+		description: "Open one or more sealed envelopes, showing everyone what's inside. You can open anyone's, unless they sealed it as private; it's usual to wait until everyone has sealed, or until the sealer says it's time.",
 		input_schema: {
 			type: "object",
-			properties: {numbers: {type: "array", items: {type: "integer"}, description: "The envelope numbers, given when you sealed them, e.g. [3] or [3, 5, 8]."}},
+			properties: {numbers: {type: "array", items: {type: "integer"}, description: "The envelope numbers, as announced when they were sealed, e.g. [3] or [3, 5, 8]."}},
 			required: ["numbers"],
 		},
 	},
@@ -95,7 +97,7 @@ function new_envelopes() {
 
 		list: [],
 
-		seal: function(author, label, content) {
+		seal: function(author, label, content, is_private = false) {
 			if (typeof label !== "string" || !label.trim() || label.length > ENVELOPE_LIMITS.label) {
 				throw new Error(`label must be text, 1 to ${ENVELOPE_LIMITS.label} characters.`);
 			}
@@ -105,12 +107,12 @@ function new_envelopes() {
 			if (this.list.length >= ENVELOPE_LIMITS.count) {
 				throw new Error(`The room can hold at most ${ENVELOPE_LIMITS.count} envelopes in a session.`);
 			}
-			let envelope = {number: this.list.length + 1, author, label: label.trim().replace(/\s+/g, " "), content, opened: false};
+			let envelope = {number: this.list.length + 1, author, label: label.trim().replace(/\s+/g, " "), content, private: is_private === true, opened: false};
 			this.list.push(envelope);
 			return envelope;
 		},
 
-		open: function(author, number) {
+		open: function(opener, number) {
 			if (!Number.isInteger(number)) {
 				throw new Error("number must be a whole number.");
 			}
@@ -118,8 +120,8 @@ function new_envelopes() {
 			if (!envelope) {
 				throw new Error(`There's no envelope #${number}.`);
 			}
-			if (envelope.author !== author) {
-				throw new Error(`Envelope #${number} is ${envelope.author}'s, and only they can open it.`);
+			if (envelope.private && envelope.author !== opener) {
+				throw new Error(`Envelope #${number} is ${envelope.author}'s private envelope, and only they can open it.`);
 			}
 			if (envelope.opened) {
 				throw new Error(`Envelope #${number} is already open.`);
@@ -131,11 +133,18 @@ function new_envelopes() {
 		unopened: function(author = null) {
 			return this.list.filter(e => !e.opened && (author === null || e.author === author));
 		},
+
+		unopened_private: function(author) {
+			return this.unopened(author).filter(e => e.private);
+		},
 	};
 }
 
-function describe_opened(e) {
-	return `envelope #${e.number} ("${e.label}"): ${e.content}`;
+// opener: who's opening it, if anyone; another model's envelope is named as theirs.
+
+function describe_opened(e, opener = null) {
+	let whose = opener && opener !== e.author ? `${e.author}'s envelope` : "envelope";
+	return `${whose} #${e.number} ("${e.label}"): ${e.content}`;
 }
 
 // Returns {content, is_error, summary, announce}. announce is a notice for the other models.
@@ -155,12 +164,13 @@ function run_utility_tool(tool_use, actor_name, opts = {}) {
 				throw new Error("There are no envelopes in this room.");
 			}
 			if (tool_use.name === "seal_envelope") {
-				let e = opts.envelopes.seal(actor_name, input.label, input.content);
+				let e = opts.envelopes.seal(actor_name, input.label, input.content, input.private === true);
+				let who_opens = e.private ? `Only you can open it` : `Anyone can open it`;
 				return {
-					content: `Sealed envelope #${e.number} ("${e.label}"). Everyone has been told it exists, but not what's inside. Open it with open_envelope, number ${e.number}.`,
+					content: `Sealed envelope #${e.number} ("${e.label}"). Everyone has been told it exists, but not what's inside. ${who_opens}, with open_envelope, number ${e.number}.`,
 					is_error: false,
-					summary: `sealed envelope #${e.number} ("${e.label}")`,		// No contents here: the host may be playing too.
-					announce: `${actor_name} sealed envelope #${e.number}: "${e.label}".`,
+					summary: `sealed ${e.private ? "private " : ""}envelope #${e.number} ("${e.label}")`,		// No contents here: the host may be playing too.
+					announce: `${actor_name} sealed ${e.private ? "private " : ""}envelope #${e.number}: "${e.label}".${e.private ? ` Only ${actor_name} can open it.` : ""}`,
 				};
 			}
 			// Several at once: each valid one opens, and any that can't be opened are reported.
@@ -185,7 +195,7 @@ function run_utility_tool(tool_use, actor_name, opts = {}) {
 			if (opened.length === 0) {
 				throw new Error(problems.join(" "));
 			}
-			let lines = opened.map(describe_opened);
+			let lines = opened.map(e => describe_opened(e, actor_name));
 			let failed = problems.length > 0 ? ` Not opened: ${problems.join(" ")}` : "";
 			return {
 				content: `You opened ${lines.join("; and ")}. Everyone can see this.${failed}`,

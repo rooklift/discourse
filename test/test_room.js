@@ -1096,22 +1096,30 @@ test("in the room: shared changes and dice are announced to others; private tool
 	assert.deepStrictEqual(turns(room)[0].tool_ops.map(o => o.tool), ["write_file", "write_file", "calculate", "roll_dice"]);
 });
 
-test("envelopes: only the sealer opens, once, and the contents are fixed", () => {
+test("envelopes: anyone opens unless private, once, and the contents are fixed", () => {
 	let {new_envelopes, ENVELOPE_LIMITS} = require("../src/utility_tools");
 	let envelopes = new_envelopes();
 	let run = (who, name, input) => run_utility_tool({name, input}, who, {envelopes});
 
-	let r = run("Sonnet", "seal_envelope", {label: "  my   number ", content: "337"});
-	assert.strictEqual(r.announce, "Sonnet sealed envelope #1: \"my number\".");
+	let r = run("Sonnet", "seal_envelope", {label: "  my   number ", content: "337", private: true});
+	assert.strictEqual(r.announce, "Sonnet sealed private envelope #1: \"my number\". Only Sonnet can open it.");
 	assert(!r.summary.includes("337") && !r.announce.includes("337"), "sealing reveals nothing");
-	assert(r.content.includes("open_envelope, number 1"));
+	assert(r.content.includes("Only you can open it, with open_envelope, number 1"));
 
-	assert.strictEqual(run("Opus", "open_envelope", {number: 1}).content, "Error: Envelope #1 is Sonnet's, and only they can open it.");
+	assert.strictEqual(run("Opus", "open_envelope", {numbers: [1]}).content, "Error: Envelope #1 is Sonnet's private envelope, and only they can open it.");
 	assert.strictEqual(run("Sonnet", "open_envelope", {number: 2}).is_error, true);
 	assert.strictEqual(run("Sonnet", "open_envelope", {number: "1"}).is_error, true);
 	r = run("Sonnet", "open_envelope", {number: 1});
 	assert.strictEqual(r.announce, "Sonnet opened envelope #1 (\"my number\"): 337");
 	assert.strictEqual(run("Sonnet", "open_envelope", {number: 1}).content, "Error: Envelope #1 is already open.");
+
+	let bid = run("Luna", "seal_envelope", {label: "round 1 bid", content: "5"});
+	assert.strictEqual(bid.announce, "Luna sealed envelope #2: \"round 1 bid\".");
+	assert(bid.content.includes("Anyone can open it"));
+	run("Sol", "seal_envelope", {label: "round 1 bid", content: "4"});
+	r = run("Sol", "open_envelope", {numbers: [2, 3]});
+	assert.strictEqual(r.announce, "Sol opened 2 envelopes: Luna's envelope #2 (\"round 1 bid\"): 5; and envelope #3 (\"round 1 bid\"): 4",
+		"one call reveals the round, naming whose each one is");
 
 	for (let bad of [{label: "", content: "x"}, {label: "x", content: ""}, {label: "x".repeat(101), content: "x"},
 		{label: "x", content: "y".repeat(2001)}, {label: 5, content: "x"}, {label: "x", content: {toString() { throw new Error("boom"); }}}]) {
@@ -1128,7 +1136,7 @@ test("envelopes in the room: sealed in private, opened in public, opened on leav
 	let backend = fake_backend((name, req, n) => {
 		if (name === "Sonnet" && n === 0) return file_step(tool("seal_envelope", {label: "my number", content: "337"}));
 		if (name === "Sonnet" && n === 1) return speak("Sealed. Guess away.");
-		if (name === "Haiku" && n === 0) return file_step(tool("seal_envelope", {label: "hidden role", content: "the spy"}));
+		if (name === "Haiku" && n === 0) return file_step(tool("seal_envelope", {label: "hidden role", content: "the spy", private: true}), tool("seal_envelope", {label: "my bid", content: "6"}));
 		if (name === "Haiku" && n === 1) return leave("I'll head off.");
 		if (name === "Sonnet" && n === 2) return file_step(tool("open_envelope", {number: 1}));
 		if (name === "Opus" && n === 0) return file_step(tool("seal_envelope", {label: "prediction", content: "rain tomorrow"}));
@@ -1147,6 +1155,7 @@ test("envelopes in the room: sealed in private, opened in public, opened on leav
 	let sonnet_after = views.filter(v => v.name === "Sonnet").pop().text;			// Sonnet's turn after Haiku left.
 	assert(sonnet_after.includes("Haiku is leaving, so the room has opened envelope #3 (\\\"hidden role\\\")"), "Haiku's secret opens as it leaves");
 	assert(sonnet_after.includes("\"): the spy"));
+	assert(!sonnet_after.includes("\"my bid\"): 6"), "an envelope anyone can open stays sealed when its sealer leaves");
 
 	let kinds = room.log.map(e => e.kind === "notice" ? e.text : (e.kind === "tool_op" ? `op:${e.summary.slice(0, 18)}` : e.kind));
 	assert(kinds.indexOf("Haiku has left the room.") > kinds.findIndex(k => k.startsWith("op:left with an env")), "opened before the departure notice");
@@ -2295,11 +2304,11 @@ test("open_envelope: several at once, with any that can't be opened reported", (
 	let run = (who, name, input) => run_utility_tool({name, input}, who, {envelopes});
 	run("Sol", "seal_envelope", {label: "a", content: "one"});
 	run("Sol", "seal_envelope", {label: "b", content: "two"});
-	run("Luna", "seal_envelope", {label: "c", content: "three"});
+	run("Luna", "seal_envelope", {label: "c", content: "three", private: true});
 	let r = run("Sol", "open_envelope", {numbers: [1, 2, 3, 1]});
 	assert(!r.is_error);
 	assert(r.content.includes("envelope #1 (\"a\")") && r.content.includes("(\"b\"): two"));
-	assert(r.content.includes("Not opened: Envelope #3 is Luna's, and only they can open it."));
+	assert(r.content.includes("Not opened: Envelope #3 is Luna's private envelope, and only they can open it."));
 	assert(r.announce.startsWith("Sol opened 2 envelopes: envelope #1"));
 	assert.strictEqual(envelopes.unopened("Luna").length, 1);
 	assert(run("Sol", "open_envelope", {numbers: [1]}).content.includes("already open"));

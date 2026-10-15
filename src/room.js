@@ -860,9 +860,11 @@ const room_prototype = {
 			p.present = false;
 			this.floor_queue = this.floor_queue.filter(n => n !== p.name);
 
-			// A secret can't leave the game with its keeper: their sealed envelopes open for all.
+			// A secret can't leave the game with its keeper: their private envelopes open for all.
+			// Others stay sealed, since anyone can open those when the time comes (opening a bid
+			// early, before everyone has sealed, would spoil the round).
 
-			for (let e of this.envelopes.unopened(p.name)) {
+			for (let e of this.envelopes.unopened_private(p.name)) {
 				e.opened = true;
 				this.append({
 					kind: "tool_op", author: p.name, tool: "open_envelope", is_error: false,
