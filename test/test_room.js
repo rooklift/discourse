@@ -23,6 +23,12 @@ function pass() {
 	return {content: [{type: "tool_use", id: `toolu_${++tool_id_counter}`, name: "pass", input: {}}], stop_reason: "tool_use", usage: usage()};
 }
 
+function call_host(text) {
+	let content = text ? [{type: "text", text: text, citations: null}] : [];
+	content.push({type: "tool_use", id: `toolu_${++tool_id_counter}`, name: "call_host", input: {}});
+	return {content, stop_reason: "tool_use", usage: usage()};
+}
+
 function leave(goodbye, note) {
 	let content = [];
 	if (goodbye) {
@@ -86,7 +92,7 @@ function validate_request(req) {
 		}
 	}
 	assert.strictEqual(typeof req.system, "string");
-	let names = req.tools.map(t => t.name);
+	let names = req.tools.map(t => t.name).filter(n => n !== "call_host");	// Only offered when the host is present.
 	assert.deepStrictEqual(names.slice(0, 10), ["pass", "leave_room", "sit_out", "note_to_host", "room_status", "roll_dice", "shuffle", "calculate", "create_envelope", "open_envelope"]);
 	assert.strictEqual(new Set(names).size, names.length, "tool names are unique");
 	assert(names.length === 10 || names.length === 18, "either no file tools or all eight");
@@ -379,11 +385,11 @@ test("system prompt template fills in every placeholder", () => {
 	assert(s.includes("isn't shown to anyone"));
 	cfg.show_thinking = true;
 	assert(build_system_prompt(cfg, cfg.participants[1]).includes("Summaries of your private reasoning are saved"));
-	assert(!s.includes("@Host: the room will wait"), "no host-floor note when the host is absent");
+	assert(!s.includes("call_host"), "no host-floor note when the host is absent");
 	assert(s.includes("Host isn't watching this session live") && !s.includes("may join in"));
 	cfg.host_present = true;
 	let present = build_system_prompt(cfg, cfg.participants[1]);
-	assert(present.includes("The same goes for @Host: the room will wait for their reply, so only write @Host when you want that"));
+	assert(present.includes("For Host, though, the @ does nothing: when you want their reply before the conversation goes on (to run something for you, say), call call_host along with your message, and the room will wait for them."));
 	assert(present.includes("Host may join in now and then") && !present.includes("isn't watching"));
 	assert(present.includes("Even while here, Host may not read everything as it happens"));
 });
@@ -398,9 +404,9 @@ async function until(predicate, ms = 1000) {
 	}
 }
 
-test("@host hands the floor to the host, and the room waits without asking anyone else", async () => {
+test("call_host hands the floor to the host, and the room waits without asking anyone else", async () => {
 	let backend = fake_backend((name, req, n) => {
-		if (name === "Opus" && n === 0) return speak("Over to you, @host. Where should we go next?");
+		if (name === "Opus" && n === 0) return call_host("Over to you, Host. Where should we go next?");
 		return speak(`${name} ${n}`);
 	});
 	let room = new_room(make_cfg({host_present: true, max_turns: 3, farewell_round: false}), backend, {template: "x", random: () => 0});
@@ -408,15 +414,20 @@ test("@host hands the floor to the host, and the room waits without asking anyon
 	await until(() => room.awaiting_host === "Opus");
 	await new Promise(r => setTimeout(r, 20));
 	assert.strictEqual(backend.calls.length, 1, "nobody else was asked while the floor was with the host");
+	assert(backend.calls[0].req.tools.some(t => t.name === "call_host"), "offered when the host is present");
+	assert(room.log.some(e => e.kind === "notice" && e.text === "Opus has handed the floor to Host, and the room is waiting for their reply."));
 	room.host_say("Somewhere warm. @Haiku, you start.");
 	await done;
 	assert.strictEqual(turns(room)[1].author, "Haiku");
 	assert.strictEqual(room.awaiting_host, null);
+	let result = turns(room)[0].steps[0].tool_results[0];
+	assert.strictEqual(result.content, "Your message was posted, and the room is waiting for Host's reply. Host may not be watching right now, so it could be a while.");
+	assert.strictEqual(backend.calls[1].name, "Haiku", "the turn ended with the call");
 });
 
-test("/resume declines a floor handed to the host, and the others carry on", async () => {
+test("/resume declines a floor handed to the host, the room says so, and the others carry on", async () => {
 	let backend = fake_backend((name, req, n) => {
-		if (name === "Opus" && n === 0) return speak("@Host, any thoughts?");
+		if (name === "Opus" && n === 0) return call_host("Host, any thoughts?");
 		return speak(`${name} ${n}`);
 	});
 	let room = new_room(make_cfg({host_present: true, max_turns: 2, farewell_round: false}), backend, {template: "x", random: () => 0});
@@ -426,24 +437,53 @@ test("/resume declines a floor handed to the host, and the others carry on", asy
 	await done;
 	assert.notStrictEqual(turns(room)[1].author, "Opus", "the model that asked doesn't get the floor straight back");
 	assert(!room.log.some(e => e.kind === "host"));
+	assert(room.log.some(e => e.kind === "notice" && e.text === "Host has handed the floor back to the room."));
+	assert(last_user_text(backend.calls[1].req).includes("Host has handed the floor back to the room."), "the next model is told");
 });
 
-test("@host alongside a model, or with no host present, doesn't stop the room", async () => {
+test("@host in text doesn't stop the room; call_host with no host present isn't offered", async () => {
 	let backend = fake_backend((name, req, n) => {
-		if (name === "Opus" && n === 0) return speak("@Host and @Haiku, what do you both think?");
+		if (name === "Opus" && n === 0) return speak("Then @Host could run it, once we're ready.");
 		return speak(`${name} ${n}`);
 	});
 	let room = new_room(make_cfg({host_present: true, max_turns: 2, farewell_round: false}), backend, {template: "x", random: () => 0});
 	await room.run();
-	assert.deepStrictEqual(turns(room).map(t => t.author), ["Opus", "Haiku"]);
+	assert.strictEqual(turns(room).length, 2, "an @ in passing is just text");
 
 	backend = fake_backend((name, req, n) => {
-		if (name === "Opus" && n === 0) return speak("What do you think, @Host?");
+		if (name === "Opus" && n === 0) return call_host("What do you think, Host?");
 		return speak(`${name} ${n}`);
 	});
 	room = new_room(make_cfg({max_turns: 2, farewell_round: false}), backend, {template: "x", random: () => 0});
 	await room.run();
-	assert.strictEqual(turns(room).length, 2, "unattended: the mention is ignored");
+	assert(!backend.calls[0].req.tools.some(t => t.name === "call_host"), "not offered when unattended");
+	assert.strictEqual(turns(room).length, 2, "unattended: a stray call doesn't stop the room");
+	assert(turns(room)[0].steps[0].tool_results[0].content.includes("aren't watching this session live"));
+});
+
+test("call_host alongside @mentions waits for the host first, then the mentioned model", async () => {
+	let backend = fake_backend((name, req, n) => {
+		if (name === "Opus" && n === 0) return call_host("Host, can you run this? @Haiku, you can read the output after.");
+		return speak(`${name} ${n}`);
+	});
+	let room = new_room(make_cfg({host_present: true, max_turns: 2, farewell_round: false}), backend, {template: "x", random: () => 0});
+	let done = room.run();
+	await until(() => room.awaiting_host === "Opus");
+	room.host_say("Done, it's in results.txt.");
+	await done;
+	assert.deepStrictEqual(turns(room).map(t => t.author), ["Opus", "Haiku"]);
+});
+
+test("call_host in the farewell round doesn't hold up closing", async () => {
+	let backend = fake_backend((name, req, n) => {
+		if (n === 1) return call_host(`${name}: one last thing, Host?`);
+		return speak(`${name} ${n}`);
+	});
+	let room = new_room(make_cfg({host_present: true, max_turns: 3}), backend, {template: "x", random: () => 0});
+	await room.run();
+	assert(room.closed);
+	assert.strictEqual(turns(room).length, 6);
+	assert(turns(room)[3].steps[0].tool_results[0].content.includes("room is closing"));
 });
 
 test("pricing: cache reads and Haiku's long-prompt tier", () => {
@@ -1294,7 +1334,7 @@ test("strict tools: required fields only, schemas within the API's strict-mode r
 	let {UTILITY_TOOLS} = require("../src/utility_tools");
 	let {TOOLS} = require("../src/room");
 	for (let has_shared of [false, true]) {
-		let all = TOOLS.concat(UTILITY_TOOLS, make_file_tools(has_shared));
+		let all = TOOLS.concat([require("../src/room").CALL_HOST_TOOL], UTILITY_TOOLS, make_file_tools(has_shared));
 		let strict = all.filter(t => t.strict);
 		assert.deepStrictEqual(strict.map(t => t.name), ["note_to_host", "shuffle", "calculate", "create_envelope", "open_envelope", "read_file", "search_files", "write_file", "append_file", "edit_file", "delete_file", "rename_file"]);
 		for (let t of all) {
@@ -2250,7 +2290,7 @@ test("system prompt: new tools, queued mentions, and that nothing is trimmed", (
 	assert(s.includes("Nothing is trimmed or summarized"));
 	assert(s.includes("they're queued for the floor in the order you mentioned them"));
 	assert(s.includes("note_to_host leaves them a note without stopping the room"));
-	assert(s.includes("so only write @Host when you want that; to mention them in passing, use their name without the @"));
+	assert(s.includes("For Host, though, the @ does nothing"));
 	assert(s.includes("roll_dice and shuffle give real randomness"));
 	assert(s.includes("room_status tells you how much is left"));
 	assert(/This session started on \w+day, \w+ \d{1,2}, \d{4}, at \d{1,2}:\d{2} [AP]M \S+ \(the host's local time\)\./.test(s), "the date comes with the clock time");

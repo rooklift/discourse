@@ -102,7 +102,8 @@ function new_envelopes() {
 				throw new Error(`label must be text, 1 to ${ENVELOPE_LIMITS.label} characters.`);
 			}
 			if (typeof content !== "string" || !content.length || content.length > ENVELOPE_LIMITS.content) {
-				throw new Error(`content must be text, 1 to ${ENVELOPE_LIMITS.content} characters.`);
+				let size = typeof content === "string" && content.length ? ` (yours was ${content.length})` : "";
+				throw new Error(`content must be text, 1 to ${ENVELOPE_LIMITS.content} characters${size}.`);
 			}
 			if (this.list.length >= ENVELOPE_LIMITS.count) {
 				throw new Error(`The room can hold at most ${ENVELOPE_LIMITS.count} envelopes in a session.`);

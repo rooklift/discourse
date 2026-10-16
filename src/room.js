@@ -63,6 +63,15 @@ const TOOLS = [
 	},
 ];
 
+// Offered only when the host is present. An @mention of the host in a message does nothing: models
+// write it in passing, and the room used to stop for those.
+
+const CALL_HOST_TOOL = {
+	name: "call_host",
+	description: "Hand the floor to the host and have the room wait for their reply: for when you want the host's answer before the conversation goes on, such as asking them to run something for you. Write your message to them as ordinary text in the same reply. Nobody else speaks until the host replies or lets the room carry on, so call this only when you're ready for them. Writing @ before the host's name doesn't do this.",
+	input_schema: {type: "object", properties: {}},
+};
+
 const ROOM_TOOL_NAMES = ["note_to_host", "room_status"];	// Run by the room itself; like file tools, the turn carries on.
 const MAX_NOTE = 4000;
 
@@ -105,7 +114,7 @@ function new_room(cfg, backend, opts = {}) {
 				name: p.name,
 				cfg: p,
 				storage: storage,					// Private folder, or null if storage is off.
-				tools: TOOLS.concat(UTILITY_TOOLS, storage ? file_tools : []),
+				tools: TOOLS.concat(cfg.host_present ? [CALL_HOST_TOOL] : [], UTILITY_TOOLS, storage ? file_tools : []),
 				system: build_system_prompt(cfg, p, opts.template ?? null, storage_info),
 				present: true,
 				sitting_out: false,					// True after sit_out, until someone @mentions this model.
@@ -358,11 +367,6 @@ const room_prototype = {
 		return found;
 	},
 
-	mentions_host: function(text) {
-		let escaped = this.cfg.host_name.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&");
-		return new RegExp(`@${escaped}(?![A-Za-z0-9_-])`, "i").test(text);
-	},
-
 	on_message: function(author, text) {
 		this.message_count++;
 		this.passed.clear();
@@ -377,13 +381,6 @@ const room_prototype = {
 		}
 		let rest = this.floor_queue.filter(n => n !== author && !mentioned.includes(n));
 		this.floor_queue = mentioned.concat(rest);
-
-		// A model that hands the floor to the host (and to no other model) gets the host's reply
-		// next, so the room waits rather than asking the others first.
-
-		if (p && this.cfg.host_present && !this.closing && mentioned.length === 0 && this.mentions_host(text)) {
-			this.awaiting_host = p.name;
-		}
 	},
 
 	eligible: function() {
@@ -694,6 +691,7 @@ const room_prototype = {
 			tool_ops: [],
 			pass: false,
 			sit_out: false,
+			call_host: false,
 			leave: null,
 			usage: usage,
 			cost: cost,
@@ -730,6 +728,9 @@ const room_prototype = {
 			} else if (t.name === "sit_out") {
 				step.sit_out = true;
 				step.tool_results.push({tool_use_id: t.id, content: `You're sitting out${turn_text.trim() ? ", and your message was posted" : ""}. You won't get the floor until someone @mentions you${this.cfg.host_present ? ` (or ${this.cfg.host_name} gives it to you)` : ""}, and then you'll see everything that happened meanwhile.`});
+			} else if (t.name === "call_host") {
+				step.call_host = true;
+				step.tool_results.push({tool_use_id: t.id, content: this.call_host_reply(turn_text)});
 			} else if (t.name === "leave_room") {
 				step.leave = t;
 				step.tool_results.push({tool_use_id: t.id, content: "You have left the room."});
@@ -766,8 +767,22 @@ const room_prototype = {
 			}
 		}
 
-		step.ends_turn = !(used_tools && step.stop_reason === "tool_use" && !step.pass && !step.sit_out && !step.leave);
+		step.ends_turn = !(used_tools && step.stop_reason === "tool_use" && !step.pass && !step.sit_out && !step.call_host && !step.leave);
 		return step;
+	},
+
+	// call_host: the room waits for the host once the turn is recorded (see record_turn).
+
+	call_host_reply: function(turn_text) {
+		let host = this.cfg.host_name;
+		let posted = turn_text.trim() ? "Your message was posted, but the" : "The";
+		if (!this.cfg.host_present) {
+			return `${posted} room can't wait for ${host}: they aren't watching this session live. note_to_host leaves them a note to read afterwards.`;
+		}
+		if (this.closing) {
+			return `${posted} room is closing, so it won't wait for ${host}'s reply.`;
+		}
+		return `${turn_text.trim() ? "Your message was posted, and the" : "The"} room is waiting for ${host}'s reply. ${host} may not be watching right now, so it could be a while.`;
 	},
 
 	// note_to_host: a note only the host sees, logged as a "host_note" entry (never shown to the
@@ -861,6 +876,7 @@ const room_prototype = {
 		let leave = steps.map(s => s.leave).find(Boolean) || null;
 		let pass = steps.some(s => s.pass);
 		let sit_out = !leave && steps.some(s => s.sit_out);
+		let call_host = !leave && steps.some(s => s.call_host);
 		let action = leave ? "leave" : (text ? "speak" : (sit_out ? "sit_out" : (pass ? "pass" : "silent")));
 		let note = typeof leave?.input?.note_to_host === "string" ? leave.input.note_to_host.trim() : "";
 		let costs = steps.map(s => s.cost);
@@ -891,6 +907,11 @@ const room_prototype = {
 			p.sitting_out = true;
 			this.floor_queue = this.floor_queue.filter(n => n !== p.name);
 			this.notice(`${p.name} is sitting out, and won't take turns until someone @mentions them.`);
+		}
+
+		if (call_host && this.cfg.host_present && !this.closing) {
+			this.awaiting_host = p.name;
+			this.notice(`${p.name} has handed the floor to ${this.cfg.host_name}, and the room is waiting for their reply.`);
 		}
 
 		if (action === "leave") {
@@ -1031,7 +1052,10 @@ const room_prototype = {
 	host_resume: function() {
 		this.paused = false;
 		this.awaiting_start = false;			// Let the models start without an opening message.
-		this.awaiting_host = null;				// Decline the floor: the other models carry on.
+		if (this.awaiting_host) {				// Decline the floor: the other models carry on.
+			this.notice(`${this.cfg.host_name} has handed the floor back to the room.`);
+			this.awaiting_host = null;
+		}
 		if (this.quiet) {
 			this.quiet = false;					// Nudge: everyone may speak again, including the last speaker
 			this.passed.clear();				// and anyone sitting out.
@@ -1126,4 +1150,4 @@ function tool_result_block(tr) {
 	return block;
 }
 
-module.exports = {new_room, TOOLS, MAX_IMAGES};
+module.exports = {new_room, TOOLS, CALL_HOST_TOOL, MAX_IMAGES};
