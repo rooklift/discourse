@@ -378,6 +378,67 @@ const storage_prototype = {
 		this.bump(name);
 		return {name};
 	},
+
+	// Renames a file, or moves it to another storage (target; this one to rename in place).
+	// Its metadata goes with it, so it keeps its record of who created and last wrote it.
+	// Won't replace an existing file unless overwrite is set. A change of case alone
+	// ("notes.md" to "Notes.md") is a rename too.
+
+	rename: function(filename, target, new_name, overwrite = false) {
+		let {name, full} = this.existing(filename);
+		target.validate(new_name);
+		let same_folder = target === this;
+		let dest_name = target.canonical(new_name);
+		let same_file = same_folder && dest_name.toLowerCase() === name.toLowerCase();
+		if (same_file) {
+			if (new_name === name) {
+				throw new Error(`${name} already has that name.`);
+			}
+			dest_name = new_name;					// Only the case changes.
+		}
+		let dest_full = target.full_path(dest_name);
+		let replaced = false;
+		if (!same_file && lexists(dest_full)) {
+			target.existing(dest_name);				// Refuses to replace a link or a folder.
+			if (overwrite !== true) {
+				throw new Error(`There's already a file called ${dest_name}${same_folder ? "" : " there"}. Choose another name, or set overwrite to true to replace it.`);
+			}
+			replaced = true;
+		}
+		if (!same_folder) {
+			target.check_room(dest_name, fs.lstatSync(full).size);
+		}
+		try {
+			fs.renameSync(full, dest_full);			// Replaces the entry itself; never follows a link.
+		} catch (error) {
+			if (error.code !== "EXDEV") {			// Different disks: copy, then remove the original.
+				throw error;
+			}
+			let text = read_text(full);
+			if (replaced) {
+				replace_text(dest_full, text);
+			} else {
+				create_text(dest_full, text);
+			}
+			fs.unlinkSync(full);
+		}
+
+		let source_meta = this.read_meta();
+		let entry = source_meta[name];
+		delete source_meta[name];
+		let dest_meta = same_folder ? source_meta : target.read_meta();
+		delete dest_meta[dest_name];				// A replaced file's record goes with it.
+		if (entry) {
+			dest_meta[dest_name] = entry;
+		}
+		this.write_meta(source_meta);
+		if (!same_folder) {
+			target.write_meta(dest_meta);
+		}
+		this.bump(name);
+		target.bump(dest_name);
+		return {name, new_name: dest_name, replaced};
+	},
 };
 
 // A plain file we can safely use: not a symlink or folder, and with no other hard links.
@@ -561,7 +622,7 @@ function remove_stale_temps(folder) {
 // ------------------------------------------------------------------------------------------------
 // Tool definitions and dispatch, used by the room.
 
-const FILE_TOOL_NAMES = ["list_files", "read_file", "search_files", "write_file", "append_file", "edit_file", "delete_file"];
+const FILE_TOOL_NAMES = ["list_files", "read_file", "search_files", "write_file", "append_file", "edit_file", "delete_file", "rename_file"];
 
 // The tool definitions, with a "folder" choice on each when the room has a shared folder.
 
@@ -628,6 +689,21 @@ function make_file_tools(has_shared) {
 			props: {filename},
 			required: ["filename"],
 		},
+		{
+			name: "rename_file",
+			description: has_shared
+				? "Rename a file, or move it between your private folder and the shared folder (with the same name or a new one). Its record of who created and last wrote it goes with it. It won't replace a file that already has the new name unless you set overwrite."
+				: "Rename a file in your private folder. Its record of who created and last wrote it goes with it. It won't replace a file that already has the new name unless you set overwrite.",
+			props: Object.assign(
+				{
+					filename,
+					new_name: {type: "string", description: has_shared ? "The new filename. To move a file without renaming it, give its current name." : "The new filename."},
+				},
+				has_shared ? {to_folder: {type: "string", enum: ["private", "shared"], description: "Optional: the folder to move it to. Default: the folder it's in now."}} : {},
+				{overwrite: {type: "boolean", description: "Optional: replace a file that already has the new name."}},
+			),
+			required: ["filename", "new_name"],
+		},
 	];
 
 	return tools.map(t => {
@@ -661,6 +737,7 @@ const REQUIRED_FIELDS = {
 	append_file: ["filename", "content"],
 	edit_file: ["filename", "old_text", "new_text"],
 	delete_file: ["filename"],
+	rename_file: ["filename", "new_name"],
 };
 
 const SHARED_VERBS = {write_file: null, append_file: "added to", edit_file: "edited", delete_file: "deleted"};
@@ -788,6 +865,39 @@ function run_file_tool(storages, tool_use, actor) {
 		case "delete_file": {
 			let r = storage.delete(input.filename);
 			return done(`Deleted ${r.name}.`, `deleted ${r.name}`, {name: r.name, announce: announce(SHARED_VERBS.delete_file, r.name)});
+		}
+
+		case "rename_file": {
+			if (typeof input.new_name !== "string") {
+				throw new Error("new_name must be a string.");
+			}
+			let to_folder = input.to_folder === undefined || input.to_folder === null ? folder : input.to_folder;
+			if (to_folder !== "private" && to_folder !== "shared") {
+				throw new Error("to_folder must be \"private\" or \"shared\".");
+			}
+			let target = storages[to_folder];
+			if (!target) {
+				throw new Error("There's no shared folder in this room.");
+			}
+			let name = storage.canonical(input.filename);
+			let had_seen = storage.has_seen_current(actor.key, name);
+			let r = storage.rename(name, target, input.new_name, input.overwrite === true);
+			if (had_seen) {
+				target.mark_seen(actor.key, r.new_name);
+			}
+			let replaced = r.replaced ? `, replacing the file that had that name` : "";
+			if (to_folder === folder) {
+				let what = `renamed ${r.name} to ${r.new_name}${replaced}`;
+				return done(`Renamed ${r.name} to ${r.new_name}${replaced}.`, what, {name: r.new_name, announce: folder === "shared" ? `${actor.key} ${what} in the shared folder.` : ""});
+			}
+
+			// A move between folders. Only the shared side is anyone else's business.
+
+			let as = r.new_name === r.name ? "" : ` as ${r.new_name}`;
+			let into = to_folder === "shared"
+				? {summary: `moved ${r.name} from their private folder into the shared folder${as}${replaced}`, announce: `${actor.key} moved ${r.new_name} into the shared folder from their private folder${r.replaced ? `, replacing the shared file that had that name` : ""}.`}
+				: {summary: `moved ${r.name} from the shared folder into their private folder${as}${replaced}`, announce: `${actor.key} moved ${r.name} out of the shared folder, into their private folder.`};
+			return {content: `Moved ${r.name} to your ${to_folder === "shared" ? "shared" : "private"} folder${as}${replaced}.`, is_error: false, summary: into.summary, folder: to_folder, name: r.new_name, announce: into.announce};
 		}
 		}
 	} catch (error) {

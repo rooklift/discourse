@@ -89,7 +89,7 @@ function validate_request(req) {
 	let names = req.tools.map(t => t.name);
 	assert.deepStrictEqual(names.slice(0, 10), ["pass", "leave_room", "sit_out", "note_to_host", "room_status", "roll_dice", "shuffle", "calculate", "create_envelope", "open_envelope"]);
 	assert.strictEqual(new Set(names).size, names.length, "tool names are unique");
-	assert(names.length === 10 || names.length === 17, "either no file tools or all seven");
+	assert(names.length === 10 || names.length === 18, "either no file tools or all eight");
 }
 
 // A fake backend. script(name, req, n) returns a response (or throws). Records all requests.
@@ -1296,7 +1296,7 @@ test("strict tools: required fields only, schemas within the API's strict-mode r
 	for (let has_shared of [false, true]) {
 		let all = TOOLS.concat(UTILITY_TOOLS, make_file_tools(has_shared));
 		let strict = all.filter(t => t.strict);
-		assert.deepStrictEqual(strict.map(t => t.name), ["note_to_host", "shuffle", "calculate", "create_envelope", "open_envelope", "read_file", "search_files", "write_file", "append_file", "edit_file", "delete_file"]);
+		assert.deepStrictEqual(strict.map(t => t.name), ["note_to_host", "shuffle", "calculate", "create_envelope", "open_envelope", "read_file", "search_files", "write_file", "append_file", "edit_file", "delete_file", "rename_file"]);
 		for (let t of all) {
 			assert.strictEqual(Boolean(t.strict), (t.input_schema.required || []).length > 0, `${t.name}: strict exactly when something is required`);
 		}
@@ -2380,6 +2380,101 @@ test("/status for the host: dollars, who's left, what the room is waiting for, a
 	assert(!after.includes("may not read everything"), "the host's version doesn't describe the host to the host");
 	let model_view = room.status_for(room.participants[0]).content;
 	assert(!model_view.includes("$") && model_view.includes("Budget: about"), "the models' version is unchanged");
+});
+
+test("rename_file: renames in place, keeping content and history; won't replace a file unless asked", () => {
+	let root = temp_dir();
+	let mine = new_storage(root, "gpt-6.1-sol");
+	let storages = {private: mine, shared: new_storage(root, "shared")};
+	let run = (input) => run_file_tool(storages, {name: "rename_file", input}, {key: "Sol", stamp: "Sol (GPT-6.1 Sol, gpt-6.1-sol)"});
+
+	mine.write("first_session.md", "notes", "Sol (GPT-6.1 Sol, gpt-6.1-sol)");
+	let created = mine.read_meta()["first_session.md"];
+	let r = run({filename: "first_session.md", new_name: "sol_notes.md"});
+	assert(!r.is_error, r.content);
+	assert.strictEqual(r.content, "Renamed first_session.md to sol_notes.md.");
+	assert.strictEqual(r.announce, "", "private renames aren't announced");
+	assert.strictEqual(mine.read("sol_notes.md").text, "notes");
+	assert(!mine.exists("first_session.md"));
+	assert.deepStrictEqual(mine.read_meta()["sol_notes.md"], created, "the file's history goes with it");
+	assert.strictEqual(mine.read_meta()["first_session.md"], undefined);
+
+	mine.write("other.md", "other", "x");
+	r = run({filename: "sol_notes.md", new_name: "OTHER.md"});
+	assert(r.is_error && r.content.includes("There's already a file called other.md. Choose another name, or set overwrite to true"), r.content);
+	assert.strictEqual(mine.read("other.md").text, "other", "nothing was replaced");
+	r = run({filename: "sol_notes.md", new_name: "other.md", overwrite: true});
+	assert.strictEqual(r.content, "Renamed sol_notes.md to other.md, replacing the file that had that name.");
+	assert.strictEqual(mine.read("other.md").text, "notes");
+	assert.deepStrictEqual(mine.read_meta()["other.md"], created, "the replaced file's record goes, the moved file's stays");
+
+	r = run({filename: "other.md", new_name: "Other.md"});
+	assert.strictEqual(r.content, "Renamed other.md to Other.md.", "a change of case is a rename");
+	assert.deepStrictEqual(mine.files().map(f => f.name), ["Other.md"]);
+	assert(run({filename: "Other.md", new_name: "Other.md"}).content.includes("already has that name"));
+	assert(run({filename: "missing.md", new_name: "x.md"}).content.includes("No file called missing.md"));
+	assert(run({filename: "Other.md", new_name: "../escape.md"}).content.includes("Invalid filename"));
+	assert(run({filename: "Other.md"}).content.includes("The call was missing new_name (it included filename)"));
+	assert(run({filename: "Other.md", new_name: "y.md", to_folder: "attic"}).content.includes("to_folder must be"));
+
+	mine.write("seen.md", "a", "x");
+	run_file_tool(storages, {name: "read_file", input: {filename: "seen.md"}}, {key: "Sol", stamp: "Sol"});
+	run({filename: "seen.md", new_name: "seen2.md"});
+	let w = run_file_tool(storages, {name: "write_file", input: {filename: "seen2.md", content: "b"}}, {key: "Sol", stamp: "Sol"});
+	assert(!w.is_error, "having read it before the rename still counts: " + w.content);
+
+	if (try_symlink(path.join(root, "outside.txt"), path.join(mine.folder, "link.md"), "file")) {
+		fs.writeFileSync(path.join(root, "outside.txt"), "outside");
+		assert(run({filename: "seen2.md", new_name: "link.md", overwrite: true}).is_error, "won't replace a link");
+		assert(run({filename: "link.md", new_name: "z.md"}).is_error, "won't rename a link");
+		assert.strictEqual(fs.readFileSync(path.join(root, "outside.txt"), "utf8"), "outside");
+	}
+});
+
+test("rename_file: moves between private and shared, announced to the others, within the shared folder's limits", () => {
+	let root = temp_dir();
+	let shared = new_storage(root, "shared");
+	let sol = {private: new_storage(root, "gpt-6.1-sol"), shared};
+	let run = (input) => run_file_tool(sol, {name: "rename_file", input}, {key: "Sol", stamp: "Sol (GPT-6.1 Sol, gpt-6.1-sol)"});
+
+	sol.private.write("draft.md", "a story", "Sol (GPT-6.1 Sol, gpt-6.1-sol)");
+	let created = sol.private.read_meta()["draft.md"];
+	let r = run({filename: "draft.md", new_name: "story.md", to_folder: "shared"});
+	assert.strictEqual(r.content, "Moved draft.md to your shared folder as story.md.");
+	assert.strictEqual(r.announce, "Sol moved story.md into the shared folder from their private folder.");
+	assert.strictEqual(shared.read("story.md").text, "a story");
+	assert(!sol.private.exists("draft.md"));
+	assert.deepStrictEqual(shared.read_meta()["story.md"], created);
+
+	r = run({filename: "story.md", new_name: "story.md", folder: "shared", to_folder: "private"});
+	assert.strictEqual(r.content, "Moved story.md to your private folder.");
+	assert.strictEqual(r.announce, "Sol moved story.md out of the shared folder, into their private folder.");
+	assert(sol.private.exists("story.md") && !shared.exists("story.md"));
+
+	shared.write("plan.md", "x", "Opus");
+	r = run({filename: "plan.md", new_name: "the_plan.md", folder: "shared"});
+	assert.strictEqual(r.announce, "Sol renamed plan.md to the_plan.md in the shared folder.");
+
+	for (let i = shared.files().length; i < LIMITS.file_count; i++) {
+		shared.write(`filler${i}.md`, "x", "t");
+	}
+	r = run({filename: "story.md", new_name: "story.md", to_folder: "shared"});
+	assert(r.is_error && r.content.includes("maximum of"), "the shared folder's limits apply: " + r.content);
+	assert(sol.private.exists("story.md"), "and the file stays where it was");
+});
+
+test("rename_file in the room: a shared rename reaches the others as a notice", async () => {
+	let root = temp_dir();
+	let backend = fake_backend((name, req, n) => {
+		if (name === "Opus" && n === 0) return file_step(tool("write_file", {filename: "draft.md", content: "hello", folder: "shared"}));
+		if (name === "Opus" && n === 1) return file_step(tool("rename_file", {filename: "draft.md", new_name: "final.md", folder: "shared"}));
+		return speak(`${name} ${n}`);
+	});
+	let room = new_room(make_cfg({storage_dir: root, max_turns: 2, farewell_round: false, first_speaker: "Opus"}), backend, {template: "x", random: () => 0});
+	await room.run();
+	let sonnet = JSON.stringify(backend.calls.filter(c => c.name === "Sonnet")[0].req.messages);
+	assert(sonnet.includes("Opus renamed draft.md to final.md in the shared folder."), sonnet.slice(-400));
+	assert(fs.existsSync(path.join(root, "shared", "final.md")));
 });
 
 // ------------------------------------------------------------------------------------------------
