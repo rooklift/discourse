@@ -1530,6 +1530,13 @@ test("the example config loads, seating only Claude models, so it needs only an 
 	assert.deepStrictEqual(cfg.participants.map(p => [p.name, p.provider]), [["Opus", "anthropic"], ["Sonnet", "anthropic"], ["Haiku", "anthropic"]]);
 	assert.deepStrictEqual(Object.keys(cfg.models), ["Opus", "Sonnet", "Haiku", "Gemini", "Sol"]);
 	assert(cfg.participants.every(p => p.price_tiers), "every seated model has prices");
+
+	let {DEFAULTS, MODEL_DEFAULTS} = require("../src/config");
+	let raw = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "config.json.example"), "utf8"));
+	assert.deepStrictEqual(Object.keys(DEFAULTS).filter(k => !Object.hasOwn(raw, k)), [], "the example shows every setting");
+	for (let [name, m] of Object.entries(raw.models)) {
+		assert.deepStrictEqual(Object.keys(MODEL_DEFAULTS).filter(k => !Object.hasOwn(m, k)), [], `${name} shows every model setting`);
+	}
 });
 
 test("storage: a model keeps its folder under any room name, and the prompt says so", () => {

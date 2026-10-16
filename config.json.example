@@ -10,6 +10,7 @@
 	"word_list": "./words.txt",
 	"show_thinking": false,
 	"opening_message": "",
+	"wait_for_host": false,
 	"first_speaker": "",
 	"floor_randomness": 0.25,
 	"max_turns": 60,
@@ -19,33 +20,48 @@
 	"models": {
 		"Opus": {
 			"model": "claude-opus-5-5",
+			"provider": "anthropic",
 			"full_name": "Claude Opus 5.5",
+			"company": "Anthropic",
 			"max_tokens": 16000,
-			"effort": "medium"
+			"effort": "medium",
+			"prices": null
 		},
 		"Sonnet": {
 			"model": "claude-sonnet-5-5",
+			"provider": "anthropic",
 			"full_name": "Claude Sonnet 5.5",
+			"company": "Anthropic",
 			"max_tokens": 16000,
-			"effort": "medium"
+			"effort": "medium",
+			"prices": null
 		},
 		"Haiku": {
 			"model": "claude-haiku-5-5",
+			"provider": "anthropic",
 			"full_name": "Claude Haiku 5.5",
+			"company": "Anthropic",
 			"max_tokens": 16000,
-			"effort": "medium"
+			"effort": "medium",
+			"prices": null
 		},
 		"Gemini": {
 			"model": "gemini-3.8-flash",
+			"provider": "google",
 			"full_name": "Gemini 3.8 Flash",
+			"company": "Google",
 			"max_tokens": 16000,
-			"effort": "medium"
+			"effort": "medium",
+			"prices": null
 		},
 		"Sol": {
 			"model": "gpt-6.1-sol",
+			"provider": "openai",
 			"full_name": "GPT-6.1 Sol",
+			"company": "OpenAI",
 			"max_tokens": 16000,
-			"effort": "medium"
+			"effort": "medium",
+			"prices": null
 		}
 	},
 	"active": ["Opus", "Sonnet", "Haiku"]

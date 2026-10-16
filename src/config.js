@@ -250,4 +250,4 @@ function read_api_keys(cfg) {
 	return keys;
 }
 
-module.exports = {load_config, read_api_keys, PROVIDERS};
+module.exports = {load_config, read_api_keys, PROVIDERS, DEFAULTS, MODEL_DEFAULTS};
