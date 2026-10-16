@@ -2319,6 +2319,38 @@ test("open_envelope: several at once, with any that can't be opened reported", (
 	assert(run("Luna", "open_envelope", {number: 3}).content.includes("three"), "the earlier single-number form still works");
 });
 
+test("wait_for_host: nobody speaks until the host does, or /resume lets them start", async () => {
+	for (let start of ["say", "resume"]) {
+		let backend = fake_backend((name, req, n) => speak(`${name} ${n}`));
+		let room = new_room(make_cfg({host_present: true, wait_for_host: true, max_turns: 2, farewell_round: false}), backend, {template: "x", random: () => 0});
+		let run = room.run();
+		await new Promise(r => setTimeout(r, 30));
+		assert.strictEqual(backend.calls.length, 0, "nobody has spoken yet");
+		assert.strictEqual(room.state().awaiting_start, true);
+		if (start === "say") {
+			room.host_say("Hello, everyone.");
+		} else {
+			room.host_resume();
+		}
+		await run;
+		assert.strictEqual(turns(room).length, 2);
+		assert.strictEqual(room.state().awaiting_start, false);
+		let first_view = last_user_text(backend.calls[0].req);
+		assert.strictEqual(first_view.includes("Hello, everyone."), start === "say", "the host's message is the first thing the models answer");
+	}
+
+	let opening = new_room(make_cfg({host_present: true, wait_for_host: true, opening_message: "Hi"}), fake_backend(() => speak("x")), {template: "x"});
+	opening.open();
+	assert.strictEqual(opening.awaiting_start, false, "an opening message already counts as the host going first");
+
+	let {load_config} = require("../src/config");
+	let dir = temp_dir();
+	fs.writeFileSync(path.join(dir, "a.txt"), "akey");
+	fs.writeFileSync(path.join(dir, "config.json"), JSON.stringify({anthropic_api_key_file: "a.txt", host_present: false, wait_for_host: true,
+		models: {Opus: {model: "claude-opus-5-5"}, Haiku: {model: "claude-haiku-5-5"}}}));
+	assert.throws(() => load_config(path.join(dir, "config.json")), /wait_for_host needs host_present/);
+});
+
 // ------------------------------------------------------------------------------------------------
 
 (async () => {

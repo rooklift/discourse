@@ -17,6 +17,7 @@ const DEFAULTS = {
 	storage_dir: "./storage",		// A private folder per model (named by model ID), plus "shared", kept between sessions. "" turns this off.
 	show_thinking: false,			// Ask the API for thinking summaries, show them to the host and save them.
 	opening_message: "",			// Optional first message from the host.
+	wait_for_host: false,			// With no opening message, wait for the host to speak first (needs host_present).
 	first_speaker: "",				// Optional name of the model who speaks first. Random if blank.
 	floor_randomness: 0.25,			// Chance (0-1) that an unaddressed floor goes to a random eligible model.
 	max_turns: 60,					// Model turns before the room starts closing. 0 = no limit.
@@ -114,6 +115,9 @@ function load_config(config_path, opts = {}) {
 		cfg[key] = resolve_path(cfg[key], Object.hasOwn(raw, key) ? base_dir : app_dir);
 	}
 
+	if (cfg.wait_for_host && !cfg.host_present) {
+		throw new Error("wait_for_host needs host_present: true, or nobody would ever speak first");
+	}
 	if (!["5m", "1h"].includes(cfg.cache_ttl)) {
 		throw new Error("cache_ttl must be \"5m\" or \"1h\"");
 	}

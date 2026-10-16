@@ -13,7 +13,7 @@
 // --image (or -i) attaches an image to the opening message, and --file (or -f) a text file.
 // Both can be given more than once.
 
-const USAGE = "Usage: node cli.js [--config path/to/config.json] [--active Name,Name,...] [--random[=N]] [--image path]... [--file path]... [opening message...]";
+const USAGE = "Usage: node cli.js [--config path/to/config.json] [--active Name,Name,...] [--wait] [--random[=N]] [--image path]... [--file path]... [opening message...]";
 const PASTE_MS = 40;						// Lines arriving closer together than this are a paste, not typing.
 const DEFAULT_RANDOM_WORDS = 5;
 
@@ -89,7 +89,7 @@ function provider_split(room) {
 
 function parse_args(argv) {
 
-	let opts = {config: path.join(__dirname, "config.json"), active: null, message: "", random: 0, images: [], files: []};
+	let opts = {config: path.join(__dirname, "config.json"), active: null, wait: false, message: "", random: 0, images: [], files: []};
 	let words = [];
 
 	for (let i = 0; i < argv.length; i++) {
@@ -104,6 +104,8 @@ function parse_args(argv) {
 				throw new Error(`${arg}: the number of words must be a whole number, 1 or more`);
 			}
 			opts.random = n;
+		} else if (arg === "--wait" || arg === "-w") {
+			opts.wait = true;
 		} else if (arg === "--config" || arg === "-c") {
 			if (i + 1 >= argv.length) {
 				throw new Error(`${arg} needs a path`);
@@ -154,6 +156,12 @@ async function main() {
 		api_keys = read_api_keys(cfg);
 		if (opts.message) {
 			cfg.opening_message = opts.message;
+		}
+		if (opts.wait) {
+			if (!cfg.host_present) {
+				throw new Error("--wait needs host_present: true in the config, or nobody would ever speak first");
+			}
+			cfg.wait_for_host = true;
 		}
 		if (opts.random) {
 			let seed = word_seed_message(pick_words(load_words(cfg.word_list), opts.random));
@@ -240,6 +248,7 @@ async function main() {
 	let was_quiet = false;
 	let was_paused = false;
 	let was_awaiting = null;
+	let was_awaiting_start = false;
 
 	room.on("state", (s) => {
 		if (s.quiet && !was_quiet) {
@@ -248,6 +257,10 @@ async function main() {
 		if (s.paused && !was_paused) {
 			print(dim("(Paused. /resume to carry on.)"));
 		}
+		if (s.awaiting_start && !was_awaiting_start) {
+			print(dim("(The room is waiting for you to speak first. Say something, or /resume to let them start without you.)"));
+		}
+		was_awaiting_start = s.awaiting_start;
 		if (s.awaiting_host && s.awaiting_host !== was_awaiting) {
 			print(dim(`(${s.awaiting_host} has handed you the floor. Say something, or /resume to let the others carry on.)`));
 		}

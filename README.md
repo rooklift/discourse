@@ -19,6 +19,7 @@ Options:
 * `--random` (or `-r`) adds 5 words, picked at random from `words.txt`, to the opening message, as optional food for thought. `--random=N` picks N. It works alone or alongside a message of your own.
 * `--image path` (or `-i`) attaches an image to the opening message; give it more than once for several.
 * `--file path` (or `-f`) attaches a text file to the opening message, likewise.
+* `--wait` (or `-w`) opens the room without an opening message and has everyone wait until you've said something, so you can type your first message at the prompt (`/resume` lets them start without you). `wait_for_host: true` in the config does the same every time.
 * `--active Opus,Sonnet,Luna` (or `-a`) seats those models this session, instead of the config's `active` list. Names are as in `models`, any case.
 * `--config path/to/other_config.json` (or `-c`) uses a different config.
 * `--` before a message that starts with a dash.
@@ -105,6 +106,7 @@ For Gemini, use a key from a **paid** account. Google's terms say free-tier prom
 | `storage_dir` | `./storage` | Each model gets a private folder in here, named by its model ID, plus one `shared` folder, all kept between sessions. `""` turns folders off. |
 | `show_thinking` | `false` | Request thinking summaries, show them to you and save them. The system prompt tells the models which setting is in effect. |
 | `opening_message` | `""` | Optional first message from you. |
+| `wait_for_host` | `false` | With no opening message, wait for you to speak first (like `--wait`). Needs `host_present`. |
 | `first_speaker` | `""` | Optional name of who speaks first; must be active. |
 | `floor_randomness` | `0.25` | 0 to 1. |
 | `max_turns` | `60` | Model turns before closing. 0 for no limit. |

@@ -136,6 +136,7 @@ function new_room(cfg, backend, opts = {}) {
 		paused: false,
 		quiet: false,
 		awaiting_host: null,					// Name of the model that handed the floor to the host, if any.
+		awaiting_start: false,					// True while the room waits for the host to speak first.
 		in_flight: null,						// Name of the model whose request is running.
 		turn_in_progress: null,					// {p, steps} of the running turn, for host_quit().
 		abort_controller: null,
@@ -164,6 +165,7 @@ const room_prototype = {
 			paused: this.paused,
 			quiet: this.quiet,
 			awaiting_host: this.awaiting_host,
+			awaiting_start: this.awaiting_start,
 			in_flight: this.in_flight,
 			closing: this.closing,
 			closed: this.closed,
@@ -256,7 +258,7 @@ const room_prototype = {
 				break;
 			}
 
-			if (this.paused || this.quiet || this.awaiting_host) {
+			if (this.paused || this.quiet || this.awaiting_host || this.awaiting_start) {
 				await this.wait();
 				continue;
 			}
@@ -287,6 +289,8 @@ const room_prototype = {
 		let opening_files = Array.isArray(this.cfg.opening_files) ? this.cfg.opening_files : [];
 		if (this.cfg.opening_message || opening_images.length > 0 || opening_files.length > 0) {
 			this.pending_host.push({text: this.cfg.opening_message || "", images: opening_images, files: opening_files});
+		} else if (this.cfg.wait_for_host && this.cfg.host_present) {
+			this.awaiting_start = true;			// Nobody speaks until the host does (or lets them start).
 		}
 		this.emit_state();
 	},
@@ -982,6 +986,7 @@ const room_prototype = {
 			this.on_message(this.cfg.host_name, m.text);		// Only the message itself can @mention, not a file's contents.
 			this.quiet = false;
 			this.awaiting_host = null;
+			this.awaiting_start = false;
 		}
 	},
 
@@ -992,6 +997,7 @@ const room_prototype = {
 
 	host_resume: function() {
 		this.paused = false;
+		this.awaiting_start = false;			// Let the models start without an opening message.
 		this.awaiting_host = null;				// Decline the floor: the other models carry on.
 		if (this.quiet) {
 			this.quiet = false;					// Nudge: everyone may speak again, including the last speaker
@@ -1019,6 +1025,7 @@ const room_prototype = {
 		this.quiet = false;
 		this.paused = false;
 		this.awaiting_host = null;
+		this.awaiting_start = false;
 		this.emit_state();
 		this.wake();
 		return true;
