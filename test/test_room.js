@@ -383,7 +383,7 @@ test("system prompt template fills in every placeholder", () => {
 	assert(s.includes("Host isn't watching this session live") && !s.includes("may join in"));
 	cfg.host_present = true;
 	let present = build_system_prompt(cfg, cfg.participants[1]);
-	assert(present.includes("The same goes for @Host: the room will wait for their reply."));
+	assert(present.includes("The same goes for @Host: the room will wait for their reply, so only write @Host when you want that"));
 	assert(present.includes("Host may join in now and then") && !present.includes("isn't watching"));
 	assert(present.includes("Even while here, Host may not read everything as it happens"));
 });
