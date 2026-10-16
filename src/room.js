@@ -14,7 +14,7 @@
 const EventEmitter = require("events");
 const pricing = require("./pricing");
 const {PROVIDERS} = require("./config");
-const {build_system_prompt} = require("./prompt");
+const {build_system_prompt, clock_time} = require("./prompt");
 const {new_storage, make_file_tools, FILE_TOOL_NAMES, run_file_tool, LIMITS} = require("./storage");
 const {UTILITY_TOOLS, UTILITY_TOOL_NAMES, run_utility_tool, new_envelopes, describe_opened} = require("./utility_tools");
 
@@ -805,7 +805,7 @@ const room_prototype = {
 		}
 		let opened = this.log.length > 0 ? Date.parse(this.log[0].time) : Date.now();
 		let minutes = Math.max(0, Math.round((Date.now() - opened) / 60000));
-		lines.push(`Open for: ${minutes} minute${minutes === 1 ? "" : "s"}.`);
+		lines.push(`Open for: ${minutes} minute${minutes === 1 ? "" : "s"}. The time now is ${clock_time(new Date())}.`);
 		let sitting = this.present_models().filter(m => m.sitting_out).map(m => m.name);
 		if (sitting.length > 0) {
 			lines.push(`Sitting out until mentioned: ${sitting.join(", ")}.`);

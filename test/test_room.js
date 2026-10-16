@@ -2244,6 +2244,9 @@ test("system prompt: new tools, queued mentions, and that nothing is trimmed", (
 	assert(s.includes("note_to_host leaves them a note without stopping the room"));
 	assert(s.includes("roll_dice and shuffle give real randomness"));
 	assert(s.includes("room_status tells you how much is left"));
+	assert(/This session started on \w+day, \w+ \d{1,2}, \d{4}, at \d{1,2}:\d{2} [AP]M \S+ \(the host's local time\)\./.test(s), "the date comes with the clock time");
+	let room = new_room(cfg, fake_backend(() => speak("x")), {template: "x"});
+	assert(/The time now is \d{1,2}:\d{2} [AP]M \S+\./.test(room.status_for(room.participants[0]).content), "room_status gives the time now");
 	let absent = build_system_prompt(make_cfg({host_present: false, system_prompt: cfg.system_prompt}), cfg.participants[0]);
 	assert(absent.includes("note_to_host leaves them a note to read afterwards"));
 });

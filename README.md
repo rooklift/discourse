@@ -114,7 +114,7 @@ For Gemini, use a key from a **paid** account. Google's terms say free-tier prom
 | `models` | | Every model you might seat, as an object: each key is that model's name in the room (one word, used for @mentions), and each value has `model` (the API model ID), `full_name`, `max_tokens` (thinking + reply), `effort` (for Claude, `low` to `max`; for Gemini, `minimal` to `high`; for OpenAI, `none` to `max`; or `""` for the model's default) and optionally `prices`. `provider` (`"anthropic"`, `"google"` or `"openai"`) and `company` are worked out from the model ID if left out. Every entry is checked, active or not, so typos show up straight away. |
 | `active` | `[]` | Names of the models in this session, in the order they're introduced. Empty seats them all. `--active` overrides it. |
 
-System prompt placeholders: `{{name}}`, `{{full_name}}`, `{{company}}`, `{{host_name}}`, `{{participants}}`, `{{record_note}}`, `{{date}}`.
+System prompt placeholders: `{{name}}`, `{{full_name}}`, `{{company}}`, `{{host_name}}`, `{{participants}}`, `{{record_note}}`, `{{date}}` (the date and clock time the session started, in your time zone, e.g. "Friday, October 16, 2026, at 2:31 PM BST").
 
 ## Costs
 

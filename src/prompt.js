@@ -46,13 +46,24 @@ And the shared folder contained:
 ${storage.shared_listing}`;
 }
 
+// "Friday, October 16, 2026, at 2:31 PM BST", in the host's local time.
+
+function date_and_time(when) {
+	let day = when.toLocaleDateString("en-US", {weekday: "long", month: "long", day: "numeric", year: "numeric"});
+	return `${day}, at ${clock_time(when)}`;
+}
+
+function clock_time(when) {
+	return when.toLocaleTimeString("en-US", {hour: "numeric", minute: "2-digit", timeZoneName: "short"});
+}
+
 function build_system_prompt(cfg, me, template = null, storage = null) {
 
 	if (template === null) {
 		template = fs.readFileSync(cfg.system_prompt, "utf8").replaceAll("\r\n", "\n");
 	}
 
-	let date = new Date().toLocaleDateString("en-US", {weekday: "long", month: "long", day: "numeric", year: "numeric"});
+	let date = date_and_time(new Date());
 
 	let replacements = {
 		"{{name}}": me.name,
@@ -76,4 +87,4 @@ function build_system_prompt(cfg, me, template = null, storage = null) {
 	return template.replace(/\n{3,}/g, "\n\n").trim();
 }
 
-module.exports = {build_system_prompt};
+module.exports = {build_system_prompt, date_and_time, clock_time};
