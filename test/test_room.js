@@ -1116,6 +1116,7 @@ test("envelopes: anyone opens unless sealed, once, and the contents are fixed", 
 	let bid = run("Luna", "create_envelope", {label: "round 1 bid", content: "5"});
 	assert.strictEqual(bid.announce, "Luna created envelope #2: \"round 1 bid\".");
 	assert(bid.content.includes("Anyone can open it"));
+	assert(bid.content.includes("keep the contents out of your message to the room"), "a reminder at the moment it matters");
 	run("Sol", "create_envelope", {label: "round 1 bid", content: "4"});
 	r = run("Sol", "open_envelope", {numbers: [2, 3]});
 	assert.strictEqual(r.announce, "Sol opened 2 envelopes: Luna's envelope #2 (\"round 1 bid\"): 5; and envelope #3 (\"round 1 bid\"): 4",
@@ -2249,6 +2250,7 @@ test("system prompt: new tools, queued mentions, and that nothing is trimmed", (
 	assert(s.includes("Nothing is trimmed or summarized"));
 	assert(s.includes("they're queued for the floor in the order you mentioned them"));
 	assert(s.includes("note_to_host leaves them a note without stopping the room"));
+	assert(s.includes("so only write @Host when you want that; to mention them in passing, use their name without the @"));
 	assert(s.includes("roll_dice and shuffle give real randomness"));
 	assert(s.includes("room_status tells you how much is left"));
 	assert(/This session started on \w+day, \w+ \d{1,2}, \d{4}, at \d{1,2}:\d{2} [AP]M \S+ \(the host's local time\)\./.test(s), "the date comes with the clock time");

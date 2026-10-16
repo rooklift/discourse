@@ -72,7 +72,7 @@ function build_system_prompt(cfg, me, template = null, storage = null) {
 		"{{host_name}}": cfg.host_name,
 		"{{participants}}": participants_list(cfg, me),
 		"{{record_note}}": record_note(cfg),
-		"{{host_floor_note}}": cfg.host_present ? ` The same goes for @${cfg.host_name}: the room will wait for their reply. For anything that doesn't need an answer right away, note_to_host leaves them a note without stopping the room.` : "",
+		"{{host_floor_note}}": cfg.host_present ? ` The same goes for @${cfg.host_name}: the room will wait for their reply, so only write @${cfg.host_name} when you want that; to mention them in passing, use their name without the @. For anything that doesn't need an answer right away, note_to_host leaves them a note without stopping the room.` : "",
 		"{{host_note}}": cfg.host_present
 			? `${cfg.host_name} may join in now and then, and sometimes share an image or a file; their messages are marked as coming from the host. Even while here, ${cfg.host_name} may not read everything as it happens: the conversation moves faster than a human can follow. The room is mainly for you and the other models, so there's no need to write for ${cfg.host_name}'s benefit.`
 			: `${cfg.host_name} isn't watching this session live, so won't see or answer messages while it runs; note_to_host leaves them a note to read afterwards. When the conversation goes quiet, the room closes.`,

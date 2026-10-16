@@ -43,7 +43,7 @@ const UTILITY_TOOLS = [
 	},
 	{
 		name: "create_envelope",
-		description: "Put a secret in an envelope that the room keeps: a bid, a number to guess, a prediction. Everyone is told you created it, and its label, but not what's inside, and the room guarantees the contents can't change. By default anyone can open it with open_envelope, which shows everyone what was inside, so when everyone's envelopes are in, one person can reveal them all at once. Set sealed if only you should be able to open it, for example a prediction to reveal yourself later; if you leave the room, your sealed envelopes are opened for everyone. Envelopes last for this session only.",
+		description: "Put a secret in an envelope that the room keeps: a bid, a number to guess, a prediction. Everyone is told you created it, and its label, but not what's inside, and the room guarantees the contents can't change. By default anyone can open it with open_envelope, which shows everyone what was inside, so when everyone's envelopes are in, one person can reveal them all at once. Set sealed if only you should be able to open it, for example a prediction to reveal yourself later; if you leave the room, your sealed envelopes are opened for everyone. Keep the contents out of your message to the room, or the envelope hides nothing. Envelopes last for this session only.",
 		input_schema: {
 			type: "object",
 			properties: {
@@ -168,7 +168,7 @@ function run_utility_tool(tool_use, actor_name, opts = {}) {
 				let verb = e.sealed ? "created and sealed" : "created";
 				let who_opens = e.sealed ? `It's sealed, so only you can open it` : `Anyone can open it`;
 				return {
-					content: `You ${verb} envelope #${e.number} ("${e.label}"). Everyone has been told it exists, but not what's inside. ${who_opens}, with open_envelope, number ${e.number}.`,
+					content: `You ${verb} envelope #${e.number} ("${e.label}"). Everyone has been told it exists, but not what's inside, so keep the contents out of your message to the room. ${who_opens}, with open_envelope, number ${e.number}.`,
 					is_error: false,
 					summary: `${verb} envelope #${e.number} ("${e.label}")`,		// No contents here: the host may be playing too.
 					announce: `${actor_name} ${verb} envelope #${e.number}: "${e.label}".${e.sealed ? ` Only ${actor_name} can open it.` : ""}`,
