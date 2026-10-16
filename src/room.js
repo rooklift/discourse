@@ -220,6 +220,13 @@ const room_prototype = {
 		return notes;
 	},
 
+	// " (Anthropic $0.47, Google $0.21)" when more than one company is in the room, else "".
+
+	cost_split: function() {
+		let groups = this.cost_by_provider();
+		return groups.length < 2 ? "" : ` (${groups.map(g => `${g.company} $${g.cost.toFixed(2)}${g.known ? "" : " incomplete"}`).join(", ")})`;
+	},
+
 	// Spending per provider, in the order they first appear in the config:
 	// [{provider, company, cost, known}].
 
@@ -792,7 +799,10 @@ const room_prototype = {
 
 	// room_status: what's left of the session, for the model who asks.
 
-	status_for: function(p) {
+	// for_host: the host's /status, which adds dollars, who has left, what the room is waiting
+	// for, and notes; the models' version stays as they were told it would be.
+
+	status_for: function(p, for_host = false) {
 		let lines = [];
 		if (this.closing) {
 			lines.push("The room is closing: this is the farewell round.");
@@ -803,9 +813,14 @@ const room_prototype = {
 			: `Turns: ${turns}. There's no turn limit.`);
 		if (this.cfg.budget > 0) {
 			let used = Math.min(100, Math.round(100 * this.total_cost / this.cfg.budget));
-			lines.push(`Budget: about ${used}% used${this.cost_known ? "" : " (not counting some models whose prices are unknown)"}. The room starts closing at 90%.`);
+			let unknown = this.cost_known ? "" : " (not counting some models whose prices are unknown)";
+			lines.push(for_host
+				? `Budget: $${this.total_cost.toFixed(2)} of $${this.cfg.budget.toFixed(2)}, about ${used}%${unknown}${this.cost_split()}. The room starts closing at 90%.`
+				: `Budget: about ${used}% used${unknown}. The room starts closing at 90%.`);
 		} else {
-			lines.push("Budget: there's no spending limit.");
+			lines.push(for_host
+				? `Spent: $${this.total_cost.toFixed(2)}${this.cost_split()}. There's no spending limit.`
+				: "Budget: there's no spending limit.");
 		}
 		let opened = this.log.length > 0 ? Date.parse(this.log[0].time) : Date.now();
 		let minutes = Math.max(0, Math.round((Date.now() - opened) / 60000));
@@ -814,8 +829,26 @@ const room_prototype = {
 		if (sitting.length > 0) {
 			lines.push(`Sitting out until mentioned: ${sitting.join(", ")}.`);
 		}
-		lines.push(`Here: ${this.present_models().map(m => m.name).join(", ")}, and ${this.cfg.host_name} (the host, ${this.cfg.host_present ? "present, though they may not read everything as it happens" : "not watching live"}).`);
-		return {content: lines.join("\n"), is_error: false, summary: "checked the room status"};
+		if (!for_host) {
+			lines.push(`Here: ${this.present_models().map(m => m.name).join(", ")}, and ${this.cfg.host_name} (the host, ${this.cfg.host_present ? "present, though they may not read everything as it happens" : "not watching live"}).`);
+			return {content: lines.join("\n"), is_error: false, summary: "checked the room status"};
+		}
+
+		lines.push(`Here: ${this.present_models().map(m => m.name).join(", ") || "nobody"}.`);
+		let gone = this.participants.filter(m => !m.present).map(m => m.name);
+		if (gone.length > 0) {
+			lines.push(`Left: ${gone.join(", ")}.`);
+		}
+		let now = this.in_flight ? `${this.in_flight} has the floor.`
+			: this.awaiting_start ? "Waiting for you to speak first."
+			: this.awaiting_host ? `Waiting for your reply to ${this.awaiting_host}.`
+			: this.paused ? "Paused."
+			: this.quiet ? "Quiet: everyone has passed."
+			: this.closed ? "Closed." : "Between turns.";
+		lines.push(`Now: ${now}`);
+		let notes = this.notes_for_host().length;
+		lines.push(`Notes left for you: ${notes}${notes > 0 ? " (/notes to read them)" : ""}.`);
+		return {content: lines.join("\n"), is_error: false, summary: "host checked the room status"};
 	},
 
 	record_turn: function(p, steps) {

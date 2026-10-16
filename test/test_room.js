@@ -2360,6 +2360,28 @@ test("wait_for_host: nobody speaks until the host does, or /resume lets them sta
 	assert.throws(() => load_config(path.join(dir, "config.json")), /wait_for_host needs host_present/);
 });
 
+test("/status for the host: dollars, who's left, what the room is waiting for, and notes", async () => {
+	let backend = fake_backend((name, req, n) => {
+		if (name === "Haiku") return leave("Bye.", "Thanks!");
+		return speak(`${name} ${n}`);
+	});
+	let room = new_room(make_cfg({host_present: true, wait_for_host: true, budget: 2, max_turns: 3, farewell_round: false}), backend, {template: "x", random: () => 0});
+	let run = room.run();
+	await new Promise(r => setTimeout(r, 20));
+	let before = room.status_for(null, true).content;
+	assert(before.includes("Now: Waiting for you to speak first."), before);
+	assert(before.includes("Budget: $0.00 of $2.00, about 0%."));
+	assert(before.includes("Notes left for you: 0."));
+	room.host_say("Hello");
+	await run;
+	let after = room.status_for(null, true).content;
+	assert(after.includes("Left: Haiku."), after);
+	assert(after.includes("Notes left for you: 1 (/notes to read them)."));
+	assert(!after.includes("may not read everything"), "the host's version doesn't describe the host to the host");
+	let model_view = room.status_for(room.participants[0]).content;
+	assert(!model_view.includes("$") && model_view.includes("Budget: about"), "the models' version is unchanged");
+});
+
 // ------------------------------------------------------------------------------------------------
 
 (async () => {

@@ -40,6 +40,8 @@ Options:
 | `/next Name` | Give Name the floor next. |
 | `/image path [caption]` | Share an image with the room. Quote the path if it has spaces. |
 | `/file path [caption]` | Share a text file with the room as one message (up to 50,000 characters). |
+| `/status` | What the models see from `room_status`, plus dollars spent (split by company), who has left, what the room is waiting for, and how many notes you have. |
+| `/notes` | Notes the models have left for you so far (they're listed again when the room closes). |
 | `/who`, `/cost` | Who's present; what it has cost. |
 | `/end` | Close with a farewell round. (Ctrl+C once.) |
 | `/quit` | Close at once. (Ctrl+C twice.) |

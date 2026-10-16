@@ -44,6 +44,8 @@ Pasting several lines sends them as one message (pasted lines never run as comma
                 Share an image with the room (quote the path if it has spaces)
   /file path [caption]
                 Share a text file with the room, as one message
+  /status       Turns, budget, time, who's here, and what the room is waiting for
+  /notes        Notes the models have left for you so far
   /who          Who is present, and what each has cost
   /cost         Total cost so far
   /end          Close the room, with a farewell round
@@ -75,16 +77,6 @@ function print(s) {
 
 function money(n) {
 	return "$" + n.toFixed(2);
-}
-
-// " (Anthropic $0.47, Google $0.21)" when more than one provider is in the room, else "".
-
-function provider_split(room) {
-	let groups = room.cost_by_provider();
-	if (groups.length < 2) {
-		return "";
-	}
-	return ` (${groups.map(g => `${g.company} ${money(g.cost)}${g.known ? "" : " incomplete"}`).join(", ")})`;
 }
 
 function parse_args(argv) {
@@ -277,7 +269,7 @@ async function main() {
 				print(`  ${n.author}${n.reply === "when you can" ? " (reply when you can)" : ""}: ${n.text}`);
 			}
 		}
-		print(dim(`Total cost: ${money(room.total_cost)}${room.cost_known ? "" : " (incomplete)"}${provider_split(room)}`));
+		print(dim(`Total cost: ${money(room.total_cost)}${room.cost_known ? "" : " (incomplete)"}${room.cost_split()}`));
 		print(dim(`Transcript: ${files.md_path}`));
 		if (rl) {
 			rl.close();
@@ -395,13 +387,26 @@ function handle_line(room, cfg, line) {
 			print(dim(`(No one present called "${args[0] || ""}".)`));
 		}
 		break;
+	case "/status":
+		print(room.status_for(null, true).content);
+		break;
+	case "/notes": {
+		let notes = room.notes_for_host();
+		if (notes.length === 0) {
+			print(dim("(No notes yet.)"));
+		}
+		for (let n of notes) {
+			print(`${paint(n.author, 1)}${n.reply === "when you can" ? " (reply when you can)" : ""}: ${n.text}`);
+		}
+		break;
+	}
 	case "/who":
 		for (let p of room.participants) {
 			print(`${p.name} (${p.cfg.full_name}): ${p.present ? (p.sitting_out ? "sitting out" : "present") : "left"}, ${p.turns} turns, ${money(p.cost)}`);
 		}
 		break;
 	case "/cost":
-		print(`Total: ${money(room.total_cost)}${room.cost_known ? "" : " (incomplete)"} of ${cfg.budget > 0 ? money(cfg.budget) : "unlimited"}${provider_split(room)}`);
+		print(`Total: ${money(room.total_cost)}${room.cost_known ? "" : " (incomplete)"} of ${cfg.budget > 0 ? money(cfg.budget) : "unlimited"}${room.cost_split()}`);
 		break;
 	case "/end":
 		room.host_end();

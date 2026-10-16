@@ -69,9 +69,7 @@ function attach_transcript(room, cfg) {
 		});
 		let total = `$${room.total_cost.toFixed(2)}${room.cost_known ? "" : " (incomplete: some prices unknown)"}`;
 		let groups = room.cost_by_provider();
-		let split = groups.length > 1
-			? ` (${groups.map(g => `${g.company} $${g.cost.toFixed(2)}${g.known ? "" : " incomplete"}`).join(", ")})`
-			: "";
+		let split = room.cost_split();
 		let notes = room.notes_for_host();
 		let notes_md = notes.length > 0
 			? `Notes left for ${cfg.host_name}:\n\n${notes.map(n => `- ${n.author}${n.reply === "when you can" ? " (reply when you can)" : ""}: ${n.text}`).join("\n")}\n\n`
