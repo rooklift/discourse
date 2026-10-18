@@ -58,6 +58,11 @@ const openai_prototype = {
 				this.on_warning(`The OpenAI API rejected the strict tool schemas, so they're off for this session (tools still work, with the room's own checks). The API said: ${error.message}`);
 				body.tools = req.tools.map(t => to_function_tool(t, false));
 				response = await this.post(body, req.signal);
+			} else if (is_refusal_error(error)) {
+
+				// Some prompts are declined before the model replies at all.
+
+				return {content: [], stop_reason: "refusal", refusal: `OpenAI declined the request: ${error.message}`, usage: to_usage(null)};
 			} else {
 				throw error;
 			}
@@ -230,17 +235,26 @@ function to_message(response) {
 	}
 
 	let stop_reason;
-	if (status === "incomplete") {
-		stop_reason = response.incomplete_details?.reason === "content_filter" ? "refusal" : "max_tokens";
+	let refusal = "";
+	if (status === "incomplete" && response.incomplete_details?.reason === "content_filter") {
+		stop_reason = "refusal";
+		refusal = "OpenAI's content filter stopped the reply";
+	} else if (status === "incomplete") {
+		stop_reason = "max_tokens";
 	} else if (refused) {
 		stop_reason = "refusal";
+		refusal = "the model returned a refusal";
 	} else if (content.some(b => b.type === "tool_use")) {
 		stop_reason = "tool_use";
 	} else {
 		stop_reason = "end_turn";
 	}
 
-	return {content, stop_reason, usage: to_usage(response?.usage), model: response?.model, id: response?.id};
+	let message = {content, stop_reason, usage: to_usage(response?.usage), model: response?.model, id: response?.id};
+	if (refusal) {
+		message.refusal = refusal;
+	}
+	return message;
 }
 
 // Strict calls fill optional fields with null; the room expects them left out. A call whose
@@ -274,6 +288,11 @@ function to_usage(u) {
 		cache_creation_input_tokens: written,
 		output_tokens: u.output_tokens || 0,
 	};
+}
+
+function is_refusal_error(error) {
+	return error instanceof APIError && error.status === 400
+		&& (error.body?.error?.code === "invalid_prompt" || /usage polic/i.test(error.message));
 }
 
 function is_strict_error(error) {

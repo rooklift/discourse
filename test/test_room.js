@@ -486,6 +486,64 @@ test("call_host in the farewell round doesn't hold up closing", async () => {
 	assert(turns(room)[3].steps[0].tool_results[0].content.includes("room is closing"));
 });
 
+test("a refusal removes the model: the others are told, never see the reply, and it isn't asked again", async () => {
+	let backend = fake_backend((name, req, n) => {
+		if (name === "Sonnet" && n === 0) return file_step(tool("create_envelope", {label: "my secret", content: "42", sealed: true}));
+		if (name === "Sonnet" && n === 1) return {content: [{type: "text", text: "PARTIAL REPLY", citations: null}], stop_reason: "refusal", usage: usage()};
+		return speak(`${name} ${n}`);
+	});
+	let cfg = make_cfg({host_present: true, max_turns: 6, farewell_round: true, transcript_dir: temp_dir()});
+	let room = new_room(cfg, backend, {template: "x", random: () => 0});
+	let files = require("../src/transcript").attach_transcript(room, cfg);
+	let ran = room.run();
+	await until(() => turns(room).length >= 6);
+	room.host_end();
+	await ran;
+
+	assert.strictEqual(backend.calls.filter(c => c.name === "Sonnet").length, 2, "never asked again, not even for the farewell round");
+	let refused = turns(room).find(t => t.action === "refused");
+	assert.strictEqual(refused.author, "Sonnet");
+	assert.strictEqual(refused.text, "");
+	assert.strictEqual(refused.withheld, "PARTIAL REPLY");
+	assert.strictEqual(refused.refusal, "the API ended the reply with a refusal");
+	assert(!room.get_participant("Sonnet").present);
+	assert.strictEqual(room.log.filter(e => e.kind === "error").length, 0, "a refusal isn't an error");
+
+	let others = backend.calls.filter(c => c.name !== "Sonnet").map(c => JSON.stringify(c.req.messages)).join("\n");
+	assert(!others.includes("PARTIAL REPLY"), "the refused text never reaches the others");
+	assert(others.includes("Sonnet's API ended their reply with a refusal, so Sonnet has been removed from the room for the rest of the session. Nothing from that reply was passed on. The room carries on."));
+	assert(others.includes("Sonnet has been removed, so the room has opened envelope #1"), "sealed envelopes open, as on leaving");
+	assert(room.log.some(e => e.kind === "warning" && e.text.startsWith("Sonnet was removed after a refusal")));
+
+	let md = fs.readFileSync(files.md_path, "utf8");
+	assert(!md.includes("PARTIAL REPLY"), "the Markdown transcript leaves the text out");
+	assert(md.includes("Sonnet's reply was refused (the API ended the reply with a refusal)."));
+	assert(fs.readFileSync(files.jsonl_path, "utf8").includes("PARTIAL REPLY"), "the JSONL keeps it");
+});
+
+test("refusals from Gemini and OpenAI: safety blocks, content filters and declined prompts", async () => {
+	let {to_message} = require("../src/backend_google");
+	let blocked = to_message(interaction([{type: "model_output", error: {code: "SAFETY", message: "blocked"}}]));
+	assert.strictEqual(blocked.stop_reason, "refusal");
+	assert.strictEqual(blocked.refusal, "Gemini blocked the reply (safety)");
+	assert.deepStrictEqual(blocked.content, []);
+	let failed = to_message(Object.assign(interaction([]), {status: "failed", errors: [{code: "prohibited_content", message: "no"}]}));
+	assert.strictEqual(failed.stop_reason, "refusal");
+	assert.throws(() => to_message(interaction([{type: "model_output", error: {code: "recitation", message: "r"}}])), /no reply/, "recitation stays an error");
+
+	let g = fake_google(() => json_response({error: {code: "blocklist", message: "blocked"}}, 400), {validate: false});
+	assert.strictEqual((await g.backend.send(backend_request([]))).stop_reason, "refusal");
+
+	let filtered = backend_openai.to_message(oai_response([], {status: "incomplete", incomplete_details: {reason: "content_filter"}}));
+	assert.strictEqual(filtered.stop_reason, "refusal");
+	assert.strictEqual(filtered.refusal, "OpenAI's content filter stopped the reply");
+	let o = fake_openai(() => json_response({error: {code: "invalid_prompt", message: "Invalid prompt: flagged as potentially violating our usage policy."}}, 400), {validate: false});
+	let declined = await o.backend.send(backend_request([]));
+	assert.strictEqual(declined.stop_reason, "refusal");
+	assert(declined.refusal.startsWith("OpenAI declined the request"));
+	assert.strictEqual(o.bodies.length, 1, "not retried");
+});
+
 test("pricing: cache reads and Haiku's long-prompt tier", () => {
 	let opus = pricing.tiers_for("claude-opus-5-5", null);
 	let c = pricing.cost_of_usage(opus, {input_tokens: 1000000, output_tokens: 1000000, cache_read_input_tokens: 1000000, cache_creation_input_tokens: 0}, "5m");

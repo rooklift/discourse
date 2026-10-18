@@ -61,6 +61,8 @@ const google_prototype = {
 				this.on_warning(`The Gemini API rejected schema-checked tool calls, so they're off for this session (tools still work, with the room's own checks). The API said: ${error.message}`);
 				body.generation_config.tool_choice = "auto";
 				interaction = await this.post(body, req.signal);
+			} else if (block_codes([error.body?.error]).length > 0) {
+				return refused(block_codes([error.body?.error]), null);	// Blocked outright: nothing to retry.
 			} else {
 				throw error;
 			}
@@ -187,6 +189,14 @@ function to_message(interaction) {
 	let status = interaction?.status;
 	let steps = Array.isArray(interaction?.steps) ? interaction.steps : [];
 
+	// A safety or policy block can arrive as the interaction's errors or a step's; either way the
+	// whole reply is treated as refused, and the room decides what to do (see make_step).
+
+	let blocked = block_codes((interaction?.errors || []).concat(steps.map(s => s?.error)));
+	if (blocked.length > 0) {
+		return refused(blocked, interaction.usage);
+	}
+
 	if (["failed", "cancelled", "budget_exceeded"].includes(status)) {
 		let detail = (interaction.errors || []).map(e => e?.message).filter(Boolean).join("; ");
 		throw new Error(`Gemini interaction ${status}${detail ? `: ${detail}` : ""}`);
@@ -231,6 +241,28 @@ function to_message(interaction) {
 	return {content, stop_reason, usage: to_usage(interaction.usage), model: interaction.model, id: interaction.id};
 }
 
+// Gemini's codes for output blocked by safety or policy filters. Recitation, language and
+// "image_other" blocks aren't refusals, so they stay ordinary errors (the floor moves on).
+
+const BLOCK_CODES = ["safety", "prohibited_content", "spii", "blocklist", "content_blocked", "image_safety", "image_prohibited_content"];
+
+function block_codes(errors) {
+	let found = [];
+	for (let e of errors) {
+		for (let v of [e?.code, e?.status, e?.reason]) {
+			let code = typeof v === "string" ? v.toLowerCase() : "";
+			if (BLOCK_CODES.includes(code) && !found.includes(code)) {
+				found.push(code);
+			}
+		}
+	}
+	return found;
+}
+
+function refused(codes, usage) {
+	return {content: [], stop_reason: "refusal", refusal: `Gemini blocked the reply (${codes.join(", ")})`, usage: to_usage(usage)};
+}
+
 // Gemini counts cached tokens inside total_input_tokens, and thinking separately from output;
 // the room (like the Messages API) counts uncached input, cache reads and output (thinking
 // included). There's no charge for writing to Gemini's implicit cache.
@@ -253,4 +285,4 @@ function is_validated_error(error) {
 	return error instanceof APIError && error.status === 400 && /tool_choice|validated/i.test(error.message);
 }
 
-module.exports = {new_google_backend, to_steps, to_message, to_usage};
+module.exports = {new_google_backend, to_steps, to_message, to_usage, BLOCK_CODES};

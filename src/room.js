@@ -693,13 +693,24 @@ const room_prototype = {
 			sit_out: false,
 			call_host: false,
 			leave: null,
+			refusal: null,						// Why the API refused, if it did.
 			usage: usage,
 			cost: cost,
 			ends_turn: true,
 		};
 		steps.push(step);
 
-		if (step.stop_reason === "max_tokens" || step.stop_reason === "refusal") {
+		// A refusal (or a provider's safety block) ends the model's time in the room: whatever it
+		// wrote is kept from the others, and record_turn removes it rather than asking it again.
+
+		if (step.stop_reason === "refusal") {
+			step.refusal = typeof response.refusal === "string" && response.refusal ? response.refusal : "the API ended the reply with a refusal";
+			step.withheld = text;
+			step.text = "";
+			return step;
+		}
+
+		if (step.stop_reason === "max_tokens") {
 
 			// A cut-off reply may hold a half-written tool call. Keep only the text, which is
 			// allowed (thinking may be dropped when no tool call is pending).
@@ -872,12 +883,14 @@ const room_prototype = {
 		this.turn_count++;
 		this.note_floor(p);
 
-		let text = steps.map(s => s.text.trim()).filter(Boolean).join("\n\n");
-		let leave = steps.map(s => s.leave).find(Boolean) || null;
+		let refusal = steps.map(s => s.refusal).find(Boolean) || null;
+		let withheld = refusal ? steps.map(s => (s.text || s.withheld || "").trim()).filter(Boolean).join("\n\n") : "";
+		let text = refusal ? "" : steps.map(s => s.text.trim()).filter(Boolean).join("\n\n");
+		let leave = refusal ? null : steps.map(s => s.leave).find(Boolean) || null;
 		let pass = steps.some(s => s.pass);
-		let sit_out = !leave && steps.some(s => s.sit_out);
-		let call_host = !leave && steps.some(s => s.call_host);
-		let action = leave ? "leave" : (text ? "speak" : (sit_out ? "sit_out" : (pass ? "pass" : "silent")));
+		let sit_out = !leave && !refusal && steps.some(s => s.sit_out);
+		let call_host = !leave && !refusal && steps.some(s => s.call_host);
+		let action = refusal ? "refused" : leave ? "leave" : (text ? "speak" : (sit_out ? "sit_out" : (pass ? "pass" : "silent")));
 		let note = typeof leave?.input?.note_to_host === "string" ? leave.input.note_to_host.trim() : "";
 		let costs = steps.map(s => s.cost);
 		let last = steps[steps.length - 1];
@@ -890,12 +903,21 @@ const room_prototype = {
 			thinking: steps.flatMap(s => s.thinking),
 			tool_ops: steps.flatMap(s => s.tool_ops),
 			note_to_host: note,
+			refusal: refusal || "",
+			withheld: withheld,					// A refused reply's text: in the JSONL only, never shown to the models.
 			stop_reason: last.stop_reason,
 			limit_note: last.limit_note || "",
 			steps: steps.map(s => ({blocks: s.blocks, tool_results: s.tool_results, usage: s.usage})),
 			cost: costs.includes(null) ? null : costs.reduce((a, b) => a + b, 0),
 			closing: this.closing,
 		});
+
+		if (refusal) {
+			this.notice(`${p.name}'s API ended their reply with a refusal, so ${p.name} has been removed from the room for the rest of the session.${withheld ? " Nothing from that reply was passed on." : ""} The room carries on.`);
+			this.warn(`${p.name} was removed after a refusal: ${refusal}.${withheld ? ` The reply's text (${withheld.length} characters) is kept in the JSONL transcript only.` : ""}`);
+			this.remove(p, "removed");
+			return;
+		}
 
 		if (text) {
 			this.on_message(p.name, text);
@@ -915,22 +937,32 @@ const room_prototype = {
 		}
 
 		if (action === "leave") {
-			p.present = false;
-			this.floor_queue = this.floor_queue.filter(n => n !== p.name);
-
-			// A secret can't leave the game with its keeper: their sealed envelopes open for all.
-			// The others stay closed, since anyone can open those when the time comes (opening a
-			// bid early, before everyone's are in, would spoil the round).
-
-			for (let e of this.envelopes.unopened_sealed(p.name)) {
-				e.opened = true;
-				this.append({
-					kind: "tool_op", author: p.name, tool: "open_envelope", is_error: false,
-					summary: `left with a sealed envelope unopened, so the room opened ${describe_opened(e)}`,
-					announce: `${p.name} is leaving, so the room has opened ${describe_opened(e)}`,
-				});
-			}
+			this.remove(p, "left");
 			this.notice(`${p.name} has left the room.`);
+		}
+	},
+
+	// Takes a model out of the room for good: how is "left" or "removed" (after a refusal).
+
+	remove: function(p, how) {
+		p.present = false;
+		p.sitting_out = false;
+		this.floor_queue = this.floor_queue.filter(n => n !== p.name);
+		if (this.awaiting_host === p.name) {
+			this.awaiting_host = null;
+		}
+
+		// A secret can't leave the game with its keeper: their sealed envelopes open for all.
+		// The others stay closed, since anyone can open those when the time comes (opening a
+		// bid early, before everyone's are in, would spoil the round).
+
+		for (let e of this.envelopes.unopened_sealed(p.name)) {
+			e.opened = true;
+			this.append({
+				kind: "tool_op", author: p.name, tool: "open_envelope", is_error: false,
+				summary: `${how === "left" ? "left" : "was removed"} with a sealed envelope unopened, so the room opened ${describe_opened(e)}`,
+				announce: `${p.name} ${how === "left" ? "is leaving" : "has been removed"}, so the room has opened ${describe_opened(e)}`,
+			});
 		}
 	},
 

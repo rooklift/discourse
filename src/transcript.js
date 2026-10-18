@@ -141,6 +141,8 @@ function markdown_for(entry, cfg) {
 
 	if (entry.action === "pass") {
 		s += `> *${entry.author} passed.*\n\n`;
+	} else if (entry.action === "refused") {
+		s += `> *${entry.author}'s reply was refused (${entry.refusal}).*\n\n`;
 	} else if (entry.action === "silent") {
 		s += `> *${entry.author} said nothing (stop reason: ${entry.stop_reason}).*\n\n`;
 	}

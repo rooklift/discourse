@@ -224,6 +224,8 @@ async function main() {
 			}
 			if (entry.action === "pass") {
 				print(dim(`(${entry.author} passed)`));
+			} else if (entry.action === "refused") {
+				print(paint(`(${entry.author}'s reply was refused: ${entry.refusal})`, 33));
 			} else if (entry.action === "silent") {
 				print(dim(`(${entry.author} said nothing; stop reason: ${entry.stop_reason})`));
 			}
