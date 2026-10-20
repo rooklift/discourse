@@ -401,8 +401,14 @@ const room_prototype = {
 			}
 		}
 
+		// Now and then, someone other than the longest-waiting, for variety; but only from those
+		// who've waited at least as long as the average, so a model that has just passed or
+		// spoken isn't pulled straight back.
+
 		if (this.random() < this.cfg.floor_randomness) {
-			return eligible[Math.floor(this.random() * eligible.length)];
+			let average = eligible.reduce((sum, p) => sum + p.last_floor, 0) / eligible.length;
+			let pool = eligible.filter(p => p.last_floor <= average);
+			return pool[Math.floor(this.random() * pool.length)];
 		}
 
 		// Whoever has gone longest without the floor. Passing counts as having had it, or a model

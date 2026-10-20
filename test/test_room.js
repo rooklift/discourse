@@ -193,6 +193,22 @@ test("when the model asked to start passes, the others are told it already went"
 	assert(seen.includes("<notice>Haiku passed.</notice>"), "the next model knows Haiku's turn already happened");
 });
 
+test("a random pick never pulls back someone who has just passed or spoken", () => {
+	let five = ["Opus", "Sonnet", "Haiku", "Sol", "Luna"].map(name => ({
+		name, model: `m-${name.toLowerCase()}`, full_name: name, company: "Test", max_tokens: 1000, effort: "", price_tiers: null,
+	}));
+	for (let r of [0, 0.3, 0.6, 0.999]) {
+		let values = [0, r];						// The first value takes the random branch; the second picks from the pool.
+		let room = new_room(make_cfg({participants: five, floor_randomness: 1}), fake_backend(() => pass()), {template: "x", random: () => values.shift() ?? 0});
+		room.note_floor(room.get_participant("Sonnet"));		// Sonnet passed...
+		room.passed.add("Sonnet");
+		room.note_floor(room.get_participant("Opus"));		// ...then Opus spoke, which lets Sonnet back in.
+		room.on_message("Opus", "Hello.");
+		let picked = room.choose_next().name;
+		assert(["Haiku", "Sol", "Luna"].includes(picked), `random value ${r} picked ${picked}`);
+	}
+});
+
 test("a model that passes isn't handed the floor again after every message", async () => {
 	// Argon's report: Sonnet passed before ever speaking, so it stayed the "quietest" and was
 	// picked after every single message.
