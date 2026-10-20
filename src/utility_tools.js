@@ -63,6 +63,15 @@ const UTILITY_TOOLS = [
 			required: ["numbers"],
 		},
 	},
+	{
+		name: "peek_envelope",
+		description: "Look inside one or more envelopes without opening them: only you see what's inside, but everyone is told you looked, and the envelope stays closed. You can peek at your own envelopes, sealed or not (handy if you've lost track of what you put in one), and at anyone's that isn't sealed.",
+		input_schema: {
+			type: "object",
+			properties: {numbers: {type: "array", items: {type: "integer"}, description: "The envelope numbers, e.g. [3] or [3, 5]."}},
+			required: ["numbers"],
+		},
+	},
 ];
 
 // Tools with required fields use strict mode, so the API guarantees those fields are present.
@@ -131,6 +140,20 @@ function new_envelopes() {
 			return envelope;
 		},
 
+		peek: function(peeker, number) {
+			if (!Number.isInteger(number)) {
+				throw new Error("number must be a whole number.");
+			}
+			let envelope = this.list.find(e => e.number === number);
+			if (!envelope) {
+				throw new Error(`There's no envelope #${number}.`);
+			}
+			if (envelope.sealed && envelope.author !== peeker) {
+				throw new Error(`Envelope #${number} is sealed: only ${envelope.author} can look inside.`);
+			}
+			return envelope;
+		},
+
 		unopened: function(author = null) {
 			return this.list.filter(e => !e.opened && (author === null || e.author === author));
 		},
@@ -148,6 +171,36 @@ function describe_opened(e, opener = null) {
 	return `${whose} #${e.number} ("${e.label}"): ${e.content}`;
 }
 
+// A peek shows the contents to the peeker only; the others are told who looked at which
+// envelope (an already-open one needs no notice). The host's summary leaves the contents out,
+// as for creating, since the host may be playing too.
+
+function peek_envelopes(envelopes, actor_name, numbers) {
+	let seen = [];
+	let problems = [];
+	for (let n of [...new Set(numbers)]) {
+		try {
+			seen.push(envelopes.peek(actor_name, n));
+		} catch (error) {
+			problems.push(error.message);
+		}
+	}
+	if (seen.length === 0) {
+		throw new Error(problems.join(" "));
+	}
+	let name = (e) => `${e.author === actor_name ? "their own envelope" : `${e.author}'s envelope`} #${e.number} ("${e.label}")`;
+	let lines = seen.map(e => `envelope #${e.number} ("${e.label}"${e.author === actor_name ? "" : `, ${e.author}'s`}${e.opened ? ", already open" : ""}): ${e.content}`);
+	let closed = seen.filter(e => !e.opened);
+	let failed = problems.length > 0 ? ` Couldn't look inside: ${problems.join(" ")}` : "";
+	let told = closed.length > 0 ? " Only you see this; the others are told you looked, and the envelopes stay closed." : " Only you see this.";
+	return {
+		content: `Inside ${lines.join("; and ")}.${told}${failed}`,
+		is_error: false,
+		summary: `peeked inside ${seen.map(name).join(", ")}${failed ? ` (${failed.trim()})` : ""}`,
+		announce: closed.length > 0 ? `${actor_name} peeked inside ${closed.map(name).join(", ")}, without opening ${closed.length === 1 ? "it" : "them"}.` : "",
+	};
+}
+
 // Returns {content, is_error, summary, announce}. announce is a notice for the other models.
 // opts: {envelopes, random_int}. A function in place of opts is taken as random_int.
 
@@ -160,7 +213,7 @@ function run_utility_tool(tool_use, actor_name, opts = {}) {
 	let input = (tool_use.input && typeof tool_use.input === "object") ? tool_use.input : {};
 
 	try {
-		if (tool_use.name === "create_envelope" || tool_use.name === "open_envelope") {
+		if (["create_envelope", "open_envelope", "peek_envelope"].includes(tool_use.name)) {
 			if (!opts.envelopes) {
 				throw new Error("There are no envelopes in this room.");
 			}
@@ -184,6 +237,9 @@ function run_utility_tool(tool_use, actor_name, opts = {}) {
 			}
 			if (numbers.length > ENVELOPE_LIMITS.count) {
 				throw new Error(`numbers can list at most ${ENVELOPE_LIMITS.count} envelopes.`);
+			}
+			if (tool_use.name === "peek_envelope") {
+				return peek_envelopes(opts.envelopes, actor_name, numbers);
 			}
 			let opened = [];
 			let problems = [];

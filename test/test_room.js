@@ -93,9 +93,9 @@ function validate_request(req) {
 	}
 	assert.strictEqual(typeof req.system, "string");
 	let names = req.tools.map(t => t.name).filter(n => n !== "call_host");	// Only offered when the host is present.
-	assert.deepStrictEqual(names.slice(0, 10), ["pass", "leave_room", "sit_out", "note_to_host", "room_status", "roll_dice", "shuffle", "calculate", "create_envelope", "open_envelope"]);
+	assert.deepStrictEqual(names.slice(0, 11), ["pass", "leave_room", "sit_out", "note_to_host", "room_status", "roll_dice", "shuffle", "calculate", "create_envelope", "open_envelope", "peek_envelope"]);
 	assert.strictEqual(new Set(names).size, names.length, "tool names are unique");
-	assert(names.length === 10 || names.length === 18, "either no file tools or all eight");
+	assert(names.length === 11 || names.length === 19, "either no file tools or all eight");
 }
 
 // A fake backend. script(name, req, n) returns a response (or throws). Records all requests.
@@ -1394,7 +1394,7 @@ test("strict tools: required fields only, schemas within the API's strict-mode r
 	for (let has_shared of [false, true]) {
 		let all = TOOLS.concat([require("../src/room").CALL_HOST_TOOL], UTILITY_TOOLS, make_file_tools(has_shared));
 		let strict = all.filter(t => t.strict);
-		assert.deepStrictEqual(strict.map(t => t.name), ["note_to_host", "shuffle", "calculate", "create_envelope", "open_envelope", "read_file", "search_files", "write_file", "append_file", "edit_file", "delete_file", "rename_file"]);
+		assert.deepStrictEqual(strict.map(t => t.name), ["note_to_host", "shuffle", "calculate", "create_envelope", "open_envelope", "peek_envelope", "read_file", "search_files", "write_file", "append_file", "edit_file", "delete_file", "rename_file"]);
 		for (let t of all) {
 			assert.strictEqual(Boolean(t.strict), (t.input_schema.required || []).length > 0, `${t.name}: strict exactly when something is required`);
 		}
@@ -2424,6 +2424,47 @@ test("open_envelope: several at once, with any that can't be opened reported", (
 	assert(run("Sol", "open_envelope", {numbers: [1]}).content.includes("already open"));
 	assert(run("Sol", "open_envelope", {numbers: []}).is_error);
 	assert(run("Luna", "open_envelope", {number: 3}).content.includes("three"), "the earlier single-number form still works");
+});
+
+test("peek_envelope: your own (even sealed) and anyone's unsealed, privately, with the others told", async () => {
+	let {run_utility_tool, new_envelopes} = require("../src/utility_tools");
+	let envelopes = new_envelopes();
+	let run = (who, name, input) => run_utility_tool({name, input}, who, {envelopes});
+	run("Luna", "create_envelope", {label: "my bid", content: "seven", sealed: true});
+	run("Opus", "create_envelope", {label: "guess", content: "forty"});
+
+	let own = run("Luna", "peek_envelope", {numbers: [1]});
+	assert(!own.is_error);
+	assert.strictEqual(own.content, "Inside envelope #1 (\"my bid\"): seven. Only you see this; the others are told you looked, and the envelopes stay closed.");
+	assert.strictEqual(own.announce, "Luna peeked inside their own envelope #1 (\"my bid\"), without opening it.");
+	assert(!own.summary.includes("seven"), "the host's summary leaves the contents out");
+	assert.strictEqual(envelopes.unopened().length, 2, "peeking opens nothing");
+
+	let theirs = run("Sol", "peek_envelope", {numbers: [2, 1]});
+	assert(!theirs.is_error);
+	assert(theirs.content.startsWith("Inside envelope #2 (\"guess\", Opus's): forty."));
+	assert(theirs.content.includes("Couldn't look inside: Envelope #1 is sealed: only Luna can look inside."));
+	assert(!theirs.content.includes("seven"));
+	assert.strictEqual(theirs.announce, "Sol peeked inside Opus's envelope #2 (\"guess\"), without opening it.");
+
+	assert(run("Sol", "peek_envelope", {numbers: [1]}).is_error, "a sealed envelope of someone else's can't be peeked");
+	assert(run("Sol", "peek_envelope", {numbers: [9]}).is_error);
+	run("Opus", "open_envelope", {numbers: [2]});
+	let open = run("Sol", "peek_envelope", {numbers: [2]});
+	assert.strictEqual(open.announce, "", "no notice for an envelope that's already open");
+	assert(open.content.includes("already open"));
+
+	// In the room: the notice reaches the others, and the contents don't.
+	let backend = fake_backend((name, req, n) => {
+		if (name === "Opus" && n === 0) return file_step(tool("create_envelope", {label: "secret", content: "hidden words"}));
+		if (name === "Sonnet" && n === 0) return file_step(tool("peek_envelope", {numbers: [1]}));
+		return speak(`${name} ${n}`);
+	});
+	let room = new_room(make_cfg({max_turns: 3, farewell_round: false}), backend, {template: "x", random: () => 0});
+	await room.run();
+	let haiku = JSON.stringify(backend.calls.filter(c => c.name === "Haiku").pop().req.messages);
+	assert(haiku.includes("Sonnet peeked inside Opus's envelope #1"));
+	assert(!haiku.includes("hidden words"));
 });
 
 test("wait_for_host: nobody speaks until the host does, or /resume lets them start", async () => {
