@@ -57,6 +57,23 @@ function clock_time(when) {
 	return when.toLocaleTimeString("en-US", {hour: "numeric", minute: "2-digit", timeZoneName: "short"});
 }
 
+// How to hand the host the floor, which depends on cfg.host_summoning. Empty if the host isn't
+// watching live.
+
+function host_floor_note(cfg) {
+	if (!cfg.host_present) {
+		return "";
+	}
+	let host = cfg.host_name;
+	let mode = cfg.host_summoning || "tool";
+	let how = {
+		tool: ` For ${host}, though, the @ does nothing: when you want their reply before the conversation goes on (to run something for you, say), call call_host along with your message, and the room will wait for them.`,
+		mention: ` The same goes for @${host}, except that the room waits for their reply before anyone else speaks, so only write @${host} when you want that; to mention them in passing, use their name without the @.`,
+		both: ` The same goes for @${host}, except that the room waits for their reply before anyone else speaks, so only write @${host} when you want that; to mention them in passing, use their name without the @. The call_host tool does the same thing, if you'd rather not rely on the @.`,
+	}[mode];
+	return `${how} For anything that doesn't need an answer right away, note_to_host leaves them a note without stopping the room.`;
+}
+
 function build_system_prompt(cfg, me, template = null, storage = null) {
 
 	if (template === null) {
@@ -72,7 +89,7 @@ function build_system_prompt(cfg, me, template = null, storage = null) {
 		"{{host_name}}": cfg.host_name,
 		"{{participants}}": participants_list(cfg, me),
 		"{{record_note}}": record_note(cfg),
-		"{{host_floor_note}}": cfg.host_present ? ` For ${cfg.host_name}, though, the @ does nothing: when you want their reply before the conversation goes on (to run something for you, say), call call_host along with your message, and the room will wait for them. For anything that doesn't need an answer right away, note_to_host leaves them a note without stopping the room.` : "",
+		"{{host_floor_note}}": host_floor_note(cfg),
 		"{{host_note}}": cfg.host_present
 			? `${cfg.host_name} may join in now and then, and sometimes share an image or a file; their messages are marked as coming from the host. Even while here, ${cfg.host_name} may not read everything as it happens: the conversation moves faster than a human can follow. The room is mainly for you and the other models, so there's no need to write for ${cfg.host_name}'s benefit.`
 			: `${cfg.host_name} isn't watching this session live, so won't see or answer messages while it runs; note_to_host leaves them a note to read afterwards. When the conversation goes quiet, the room closes.`,

@@ -11,6 +11,7 @@
 	"show_thinking": false,
 	"opening_message": "",
 	"wait_for_host": false,
+	"host_summoning": "tool",
 	"first_speaker": "",
 	"floor_randomness": 0.25,
 	"max_turns": 60,

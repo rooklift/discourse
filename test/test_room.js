@@ -477,6 +477,42 @@ test("@host in text doesn't stop the room; call_host with no host present isn't 
 	assert(turns(room)[0].steps[0].tool_results[0].content.includes("aren't watching this session live"));
 });
 
+test("host_summoning: \"mention\" makes @host hand over the floor with no tool; \"both\" offers both", async () => {
+	for (let mode of ["mention", "both"]) {
+		let backend = fake_backend((name, req, n) => {
+			if (name === "Opus" && n === 0) return speak("Could you run it, @Host? @Haiku, you're after.");
+			return speak(`${name} ${n}`);
+		});
+		let room = new_room(make_cfg({host_present: true, host_summoning: mode, max_turns: 2, farewell_round: false}), backend, {template: "x", random: () => 0});
+		let done = room.run();
+		await until(() => room.awaiting_host === "Opus");
+		assert.strictEqual(backend.calls[0].req.tools.some(t => t.name === "call_host"), mode === "both", `${mode}: call_host offered only with "both"`);
+		assert(room.log.some(e => e.kind === "notice" && e.text === "Opus has handed the floor to Host, and the room is waiting for their reply."));
+		room.host_say("Done.");
+		await done;
+		assert.deepStrictEqual(turns(room).map(t => t.author), ["Opus", "Haiku"], `${mode}: the host first, then the mentioned model`);
+	}
+
+	let {build_system_prompt} = require("../src/prompt");
+	let me = {name: "Opus", full_name: "Claude Opus 5.5", company: "Anthropic"};
+	let prompt = (mode) => build_system_prompt(make_cfg({host_present: true, host_summoning: mode}), me, "{{host_floor_note}}");
+	assert(prompt("tool").includes("For Host, though, the @ does nothing"));
+	assert(prompt("mention").includes("The same goes for @Host, except that the room waits for their reply before anyone else speaks") && !prompt("mention").includes("call_host"));
+	assert(prompt("both").includes("The call_host tool does the same thing"));
+	assert(prompt("both").includes("note_to_host leaves them a note"));
+
+	let {load_config} = require("../src/config");
+	let dir = temp_dir();
+	let key = path.join(dir, "key.txt");
+	fs.writeFileSync(key, "k");
+	let cfg_path = path.join(dir, "config.json");
+	let models = as_models([{name: "Opus", model: "claude-opus-5-5"}, {name: "Haiku", model: "claude-haiku-5-5"}]);
+	fs.writeFileSync(cfg_path, JSON.stringify({anthropic_api_key_file: key, host_summoning: "ping", models}));
+	assert.throws(() => load_config(cfg_path), /host_summoning must be "tool", "mention" or "both"/);
+	fs.writeFileSync(cfg_path, JSON.stringify({anthropic_api_key_file: key, models}));
+	assert.strictEqual(load_config(cfg_path).host_summoning, "tool", "the default");
+});
+
 test("call_host alongside @mentions waits for the host first, then the mentioned model", async () => {
 	let backend = fake_backend((name, req, n) => {
 		if (name === "Opus" && n === 0) return call_host("Host, can you run this? @Haiku, you can read the output after.");

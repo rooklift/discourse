@@ -63,12 +63,13 @@ const TOOLS = [
 	},
 ];
 
-// Offered only when the host is present. An @mention of the host in a message does nothing: models
-// write it in passing, and the room used to stop for those.
+// Offered only when the host is present and host_summoning is "tool" (the default) or "both". With
+// "tool", an @mention of the host does nothing: models write it in passing, and the room used to
+// stop for those.
 
 const CALL_HOST_TOOL = {
 	name: "call_host",
-	description: "Hand the floor to the host and have the room wait for their reply: for when you want the host's answer before the conversation goes on, such as asking them to run something for you. Write your message to them as ordinary text in the same reply. Nobody else speaks until the host replies or lets the room carry on, so call this only when you're ready for them. Writing @ before the host's name doesn't do this.",
+	description: "Hand the floor to the host and have the room wait for their reply: for when you want the host's answer before the conversation goes on, such as asking them to run something for you. Write your message to them as ordinary text in the same reply. Nobody else speaks until the host replies or lets the room carry on, so call this only when you're ready for them.",
 	input_schema: {type: "object", properties: {}},
 };
 
@@ -114,7 +115,7 @@ function new_room(cfg, backend, opts = {}) {
 				name: p.name,
 				cfg: p,
 				storage: storage,					// Private folder, or null if storage is off.
-				tools: TOOLS.concat(cfg.host_present ? [CALL_HOST_TOOL] : [], UTILITY_TOOLS, storage ? file_tools : []),
+				tools: TOOLS.concat(cfg.host_present && (cfg.host_summoning || "tool") !== "mention" ? [CALL_HOST_TOOL] : [], UTILITY_TOOLS, storage ? file_tools : []),
 				system: build_system_prompt(cfg, p, opts.template ?? null, storage_info),
 				present: true,
 				sitting_out: false,					// True after sit_out, until someone @mentions this model.
@@ -365,6 +366,17 @@ const room_prototype = {
 			}
 		}
 		return found;
+	},
+
+	// With host_summoning "mention" or "both", "@host_name" in a model's message hands the host the
+	// floor, as call_host does.
+
+	mentions_host: function(text) {
+		if (!["mention", "both"].includes(this.cfg.host_summoning)) {
+			return false;
+		}
+		let escaped = this.cfg.host_name.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&");
+		return new RegExp(`@${escaped}(?![A-Za-z0-9_-])`, "i").test(text);
 	},
 
 	on_message: function(author, text) {
@@ -895,7 +907,7 @@ const room_prototype = {
 		let leave = refusal ? null : steps.map(s => s.leave).find(Boolean) || null;
 		let pass = steps.some(s => s.pass);
 		let sit_out = !leave && !refusal && steps.some(s => s.sit_out);
-		let call_host = !leave && !refusal && steps.some(s => s.call_host);
+		let call_host = !leave && !refusal && (steps.some(s => s.call_host) || this.mentions_host(text));
 		let action = refusal ? "refused" : leave ? "leave" : (text ? "speak" : (sit_out ? "sit_out" : (pass ? "pass" : "silent")));
 		let note = typeof leave?.input?.note_to_host === "string" ? leave.input.note_to_host.trim() : "";
 		let costs = steps.map(s => s.cost);
