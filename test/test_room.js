@@ -2286,6 +2286,9 @@ test("pricing and config: OpenAI models", () => {
 	let tiers = pricing.tiers_for("gpt-6.1-sol", null);
 	assert.strictEqual(pricing.cost_of_usage(tiers, short, "5m").toFixed(2), "0.31");
 	assert.strictEqual(pricing.cost_of_usage(tiers, long, "5m").toFixed(2), "1.35", "over 272K, the whole request is repriced");
+	let terra = pricing.tiers_for("gpt-6.1-terra", null);
+	assert.strictEqual(pricing.cost_of_usage(terra, short, "5m").toFixed(4), "0.1550");
+	assert.strictEqual(pricing.cost_of_usage(terra, long, "5m").toFixed(4), "0.6750", "Terra's long-context rates: 2x input, 1.5x output");
 
 	let {load_config, read_api_keys} = require("../src/config");
 	let dir = temp_dir();
