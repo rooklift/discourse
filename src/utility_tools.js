@@ -1,9 +1,9 @@
 "use strict";
 
 // Tools that aren't about files: dice and shuffling (real randomness, announced to everyone so
-// games stay fair), a calculator (private, like thinking), and envelopes (a secret the room keeps
-// unchanged until it's opened, for games with hidden information). Anyone can open an envelope, so
-// a round's bids can all be revealed in one call, unless its creator sealed it.
+// nobody has to take the result on trust), a calculator (private, like thinking), and envelopes
+// (something committed to now, which the room keeps unchanged until it's opened). Anyone can open
+// an envelope, so several can be revealed in one call, unless its creator sealed it.
 
 const crypto = require("crypto");
 const {calculate, NAMES_HELP} = require("./calc");
@@ -22,7 +22,7 @@ const UTILITY_TOOLS = [
 	},
 	{
 		name: "shuffle",
-		description: "Shuffle a list with real randomness, or draw some items from it without replacement: for a turn order, assigning roles, dealing, or picking several different options. Everyone in the room sees the list and the result.",
+		description: "Shuffle a list with real randomness, or draw some items from it without replacement: for example to put things in a random order, or to pick several different options. Everyone in the room sees the list and the result.",
 		input_schema: {
 			type: "object",
 			properties: {
@@ -37,17 +37,17 @@ const UTILITY_TOOLS = [
 		description: `Evaluate an arithmetic expression the way a calculator would (double precision). The other models don't see the result. ${NAMES_HELP}`,
 		input_schema: {
 			type: "object",
-			properties: {expression: {type: "string", description: "For example: 100000 / ln(10), or comb(52, 5)."}},
+			properties: {expression: {type: "string", description: "For example: 100000 / ln(10), or sqrt(2) * 1e6."}},
 			required: ["expression"],
 		},
 	},
 	{
 		name: "create_envelope",
-		description: "Put a secret in an envelope that the room keeps: a bid, a number to guess, a prediction. Everyone is told you created it, and its label, but not what's inside, and the room guarantees the contents can't change. By default anyone can open it with open_envelope, which shows everyone what was inside, so when everyone's envelopes are in, one person can reveal them all at once. Set sealed if only you should be able to open it, for example a prediction to reveal yourself later; if you leave the room, your sealed envelopes are opened for everyone. Keep the contents out of your message to the room, or the envelope hides nothing. Envelopes last for this session only.",
+		description: "Put something in an envelope that the room keeps, to commit to it now and show it later: a guess, a prediction, or an answer you want to give before hearing anyone else's. Everyone is told you created it, and its label, but not what's inside, and the room guarantees the contents can't change. By default anyone can open it with open_envelope, which shows everyone what was inside, so when several people have written envelopes on the same question, one person can reveal them all at once. Set sealed if only you should be able to open it, for example a prediction to reveal yourself later; if you leave the room, your sealed envelopes are opened for everyone. Keep the contents out of your message to the room, or the envelope hides nothing. Envelopes last for this session only.",
 		input_schema: {
 			type: "object",
 			properties: {
-				label: {type: "string", description: "A short public label, e.g. \"round 2 bid\". Everyone sees this."},
+				label: {type: "string", description: "A short public label, e.g. \"my guess\". Everyone sees this."},
 				content: {type: "string", description: "The secret. The other models don't see this until the envelope is opened (the host's records do include it)."},
 				sealed: {type: "boolean", description: "Optional. If true, only you can open it (everyone still sees what's inside when you do). Default false: anyone can."},
 			},

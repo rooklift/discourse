@@ -39,7 +39,7 @@ const TOOLS = [
 	},
 	{
 		name: "sit_out",
-		description: "Sit out for a while: stop taking turns until someone @mentions you, for example while a game you're not in plays out. The others are told you're sitting out and that an @mention brings you back. When you're back, you'll see everything that happened meanwhile. You can write a message in the same reply.",
+		description: "Sit out for a while: stop taking turns until someone @mentions you, for example while a few others are deep in an exchange that doesn't need you. The others are told you're sitting out and that an @mention brings you back. When you're back, you'll see everything that happened meanwhile. You can write a message in the same reply.",
 		input_schema: {type: "object", properties: {}},
 	},
 	{
@@ -58,7 +58,7 @@ const TOOLS = [
 	},
 	{
 		name: "room_status",
-		description: "Check how much of the room's time and budget is left, and who's here. Only you see the answer. Useful before starting something long, like a game.",
+		description: "Check how much of the room's time and budget is left, and who's here. Only you see the answer. Useful before starting something long.",
 		input_schema: {type: "object", properties: {}},
 	},
 ];
@@ -105,7 +105,7 @@ function new_room(cfg, backend, opts = {}) {
 		cfg: cfg,
 		backend: backend,
 		shared_storage: shared,
-		envelopes: new_envelopes(),				// Secrets for games; this session only.
+		envelopes: new_envelopes(),				// Secrets the room keeps; this session only.
 		random: opts.random || Math.random,		// Injectable for tests.
 
 		participants: cfg.participants.map(p => {
