@@ -95,7 +95,7 @@ function validate_request(req) {
 	let names = req.tools.map(t => t.name).filter(n => n !== "call_host");	// Only offered when the host is present.
 	assert.deepStrictEqual(names.slice(0, 11), ["pass", "leave_room", "sit_out", "note_to_host", "room_status", "roll_dice", "shuffle", "calculate", "create_envelope", "open_envelope", "peek_envelope"]);
 	assert.strictEqual(new Set(names).size, names.length, "tool names are unique");
-	assert(names.length === 11 || names.length === 19, "either no file tools or all eight");
+	assert(names.length === 11 || (names.length === 20 && names[19] === "render_svg"), "either no file tools, or all eight and render_svg");
 }
 
 // A fake backend. script(name, req, n) returns a response (or throws). Records all requests.
@@ -2669,6 +2669,150 @@ test("rename_file in the room: a shared rename reaches the others as a notice", 
 	let sonnet = JSON.stringify(backend.calls.filter(c => c.name === "Sonnet")[0].req.messages);
 	assert(sonnet.includes("Opus renamed draft.md to final.md in the shared folder."), sonnet.slice(-400));
 	assert(fs.existsSync(path.join(root, "shared", "final.md")));
+});
+
+// ------------------------------------------------------------------------------------------------
+// render_svg: drawings the models make.
+
+const {render_svg, RENDER_LONG_EDGE} = require("../src/render");
+const {MAX_RENDERS, MAX_IMAGES} = require("../src/room");
+
+const SVG_BOX = `<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100"><rect x="0" y="0" width="100" height="100" fill="#0000ff"/></svg>`;
+
+async function mean_rgb(im) {
+	let stats = await sharp(Buffer.from(im.data, "base64")).stats();
+	return stats.channels.slice(0, 3).map(c => Math.round(c.mean));
+}
+
+test("render_svg: scaled to the long edge, flattened on white, and nothing outside the file is drawn", async () => {
+	let im = await render_svg(SVG_BOX);
+	assert.deepStrictEqual([im.width, im.height, im.media_type], [RENDER_LONG_EDGE, RENDER_LONG_EDGE / 2, "image/png"]);
+	let decoded = await sharp(Buffer.from(im.data, "base64")).metadata();
+	assert.deepStrictEqual([decoded.width, decoded.height, decoded.hasAlpha], [im.width, im.height, false], "the data matches, with no transparency");
+	assert.deepStrictEqual(await mean_rgb(im), [128, 128, 255], "half blue, half white background");
+	assert.strictEqual(im.tokens, Math.ceil(im.width / 28) * Math.ceil(im.height / 28));
+
+	let viewbox = await render_svg(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 400"><rect width="300" height="400" fill="red"/></svg>`);
+	assert.deepStrictEqual([viewbox.width, viewbox.height], [768, 1024], "a viewBox alone gives the size");
+	let huge = await render_svg(`<svg xmlns="http://www.w3.org/2000/svg" width="100000" height="50000"><rect width="100000" height="50000" fill="red"/></svg>`);
+	assert.deepStrictEqual([huge.width, huge.height], [1024, 512], "a huge declared size is drawn small");
+
+	// A link to a real file beside the test's working files: not followed, by path or by URL.
+
+	let dir = temp_dir();
+	let red = await make_image(dir, "red.png", 50, 50);
+	for (let href of [red, `file://${red}`, "red.png"]) {
+		let linked = await render_svg(`<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><image href="${href}" width="100" height="100"/></svg>`);
+		assert.deepStrictEqual(await mean_rgb(linked), [255, 255, 255], `${href} isn't drawn`);
+	}
+	let entity = `<?xml version="1.0"?><!DOCTYPE svg [<!ENTITY x SYSTEM "file://${red}">]><svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><text>&x;</text></svg>`;
+	await assert.rejects(render_svg(entity), /couldn't be read as SVG/);
+
+	await assert.rejects(render_svg(""), /the file is empty/);
+	await assert.rejects(render_svg("<svg><rect"), /couldn't be read as SVG \(XML parse error/);
+	await assert.rejects(render_svg("just some notes"), /couldn't be read as SVG/);
+});
+
+test("render_svg in the room: posted after the message, seen by everyone including its author, and saved for the host", async () => {
+	let root = temp_dir();
+	let backend = fake_backend((name, req, n) => {
+		if (name === "Opus" && n === 0) return file_step(tool("write_file", {filename: "map.svg", content: SVG_BOX, folder: "shared"}), tool("render_svg", {filename: "map.svg", folder: "shared"}));
+		if (name === "Opus" && n === 1) return speak("Here's the map.");
+		if (name === "Sonnet" && n === 0) return file_step(tool("write_file", {filename: "mine.svg", content: SVG_BOX}), tool("render_svg", {filename: "mine.svg"}));
+		if (name === "Sonnet" && n === 1) return pass();
+		return speak(`${name} ${n}`);
+	});
+	let cfg = make_cfg({storage_dir: root, max_turns: 4, farewell_round: false, first_speaker: "Opus", transcript_dir: temp_dir()});
+	let room = new_room(cfg, backend, {template: "x", random: () => 0});
+	let files = require("../src/transcript").attach_transcript(room, cfg);
+	await room.run();
+
+	let opus_steps = backend.calls.filter(c => c.name === "Opus");
+	let result = opus_steps[1].req.messages.pop().content.find(b => b.type === "tool_result" && b.content.startsWith("Rendered"));
+	assert(result.content.startsWith("Rendered map.svg in the shared folder as Image 1 (1024x512). It will be posted to the room after your message"), result.content);
+
+	let kinds = room.log.map(e => e.kind);
+	assert.deepStrictEqual(room.log.filter(e => e.kind === "render").map(e => [e.author, e.images.map(im => im.number)]), [["Opus", [1]], ["Sonnet", [2]]]);
+	assert.strictEqual(kinds.indexOf("render"), kinds.indexOf("turn") + 1, "right after the turn that rendered it");
+
+	let blocks = backend.calls.find(c => c.name === "Sonnet").req.messages.flatMap(m => m.content);
+	let i = blocks.findIndex(b => b.type === "image");
+	assert(i > 0, "Sonnet sees the drawing");
+	assert(blocks[i - 1].text.endsWith("<message from=\"Opus\">\nHere's the map.\n</message>\n\n<notice>Image 1, rendered by Opus from map.svg in the shared folder:</notice>"), blocks[i - 1].text);
+
+	let haiku = backend.calls.find(c => c.name === "Haiku").req.messages.flatMap(m => m.content);
+	let labels = haiku.filter(b => b.type === "text").map(b => b.text).join("\n");
+	assert(labels.includes("<notice>Image 2, rendered by Sonnet from mine.svg in Sonnet's private folder:</notice>"), "a private file is named as such");
+	assert(labels.indexOf("Sonnet passed.") < labels.indexOf("Image 2, rendered by Sonnet"), "a render with a pass still follows the turn");
+	assert.strictEqual(haiku.filter(b => b.type === "image").length, 2);
+
+	// Opus's own view, at its next turn: its turn as assistant messages, then the drawing.
+
+	let later = opus_steps[2].req.messages;
+	let own = later.findIndex(m => m.role === "assistant" && JSON.stringify(m.content).includes("Here's the map."));
+	let after = later[own + 1].content;
+	assert(after.some(b => b.type === "text" && b.text.includes("<notice>Image 1, rendered by you from map.svg in the shared folder:</notice>")));
+	assert(after.some(b => b.type === "image"), "the author sees its own drawing after its turn");
+
+	let status = room.status_for(room.get_participant("Haiku")).content;
+	assert(status.includes(`Renders (render_svg): ${MAX_RENDERS - 2} of ${MAX_RENDERS} left this session.`), status);
+	assert.strictEqual(room.images_left(), MAX_IMAGES, "renders don't use up the host's images");
+
+	let entry = fs.readFileSync(files.jsonl_path, "utf8").trim().split("\n").map(JSON.parse).find(e => e.kind === "render");
+	assert(entry.images[0].file.endsWith("-images/image-1.png") && !entry.images[0].data, "saved as a file, not inline");
+	let saved = path.join(path.dirname(files.jsonl_path), entry.images[0].file);
+	assert.strictEqual(fs.readFileSync(saved).toString("base64"), room.log.find(e => e.kind === "render").images[0].data);
+	let md = fs.readFileSync(files.md_path, "utf8");
+	assert(md.includes(`![Image 1: map.svg (shared), rendered by Opus](${entry.images[0].file})`), "the Markdown shows it");
+	assert(md.includes("Opus rendered map.svg in the shared folder as Image 1 (1024x512, about 703 tokens)."));
+});
+
+test("render_svg: errors, the session limit, numbering shared with the host's images, and nothing after a refusal", async () => {
+	let root = temp_dir();
+	let dir = temp_dir();
+	let photo = await prepare_image(await make_image(dir, "a.jpg", 100, 100));
+	let results = [];
+	let backend = fake_backend((name, req, n) => {
+		let last = req.messages[req.messages.length - 1].content.filter(b => b.type === "tool_result").map(b => b.content);
+		results.push(...last);
+		if (name === "Opus" && n === 0) return file_step(
+			tool("write_file", {filename: "a.svg", content: SVG_BOX}),
+			tool("write_file", {filename: "notes.md", content: "not a drawing"}),
+			tool("render_svg", {filename: "missing.svg"}),
+			tool("render_svg", {filename: "notes.md"}),
+			tool("render_svg", {filename: "a.svg", folder: "elsewhere"}),
+			tool("render_svg", {filename: "a.svg"}),
+			tool("render_svg", {filename: "a.svg"}));
+		if (name === "Opus" && n === 1) return speak("Two of the same.");
+		if (name === "Sonnet" && n === 0) return file_step(tool("write_file", {filename: "b.svg", content: SVG_BOX}), tool("render_svg", {filename: "b.svg"}));
+		if (name === "Sonnet" && n === 1) return {content: [], stop_reason: "refusal", usage: usage()};
+		return speak(`${name} ${n}`);
+	});
+	let room = new_room(make_cfg({storage_dir: root, host_present: true, max_turns: 3, farewell_round: false, first_speaker: "Opus"}), backend, {template: "x", random: () => 0});
+	room.host_say("A photo first.", [photo]);
+	room.render_count = MAX_RENDERS - 3;				// Three left: two for Opus, one for Sonnet.
+	await room.run();
+
+	assert(results.includes("Error: No file called missing.svg."), results.join("\n"));
+	assert(results.some(r => /^Error: notes\.md couldn't be drawn: it couldn't be read as SVG/.test(r)));
+	assert(results.includes("Error: folder must be \"private\" or \"shared\"."));
+	assert(results.some(r => r.startsWith("Rendered a.svg as Image 2 (1024x512).") && r.endsWith("The room has 2 renders left this session.")));
+	assert(results.some(r => r.startsWith("Rendered a.svg as Image 3") && r.endsWith("The room has 1 render left this session.")));
+	assert(results.some(r => r.startsWith("Rendered b.svg as Image 4") && r.endsWith("That was the room's last render this session.")));
+
+	let renders = room.log.filter(e => e.kind === "render");
+	assert.deepStrictEqual(renders.map(e => [e.author, e.images.map(im => im.number)]), [["Opus", [2, 3]]], "the refused turn's drawing is never posted");
+	assert(!backend.calls.filter(c => c.name !== "Sonnet").some(c => JSON.stringify(c.req.messages).includes("rendered by Sonnet")));
+
+	let ops = room.log.filter(e => e.kind === "tool_op" && e.tool === "render_svg");
+	assert.deepStrictEqual(ops.map(o => o.is_error), [true, true, true, false, false, false]);
+	assert.strictEqual(ops[0].summary, "tried render_svg on \"missing.svg\", error: No file called missing.svg.");
+	assert(room.log.every(e => e.kind !== "tool_op" || !e.announce || !e.announce.includes("render")), "rendering itself isn't announced: the image is");
+
+	let over = await room.run_render(room.get_participant("Opus"), {filename: "a.svg"}, {renders: []});
+	assert.strictEqual(over.content, `Error: The room has already rendered ${MAX_RENDERS} drawings this session, which is its limit.`);
+	let no_name = await room.run_render(room.get_participant("Opus"), {}, {renders: []});
+	assert.strictEqual(no_name.content, "Error: Say which file to draw, for example \"map.svg\".");
 });
 
 // ------------------------------------------------------------------------------------------------

@@ -201,6 +201,10 @@ async function main() {
 				shown.push(entry.text);
 			}
 			print(`${paint(cfg.host_name, 1)}: ${shown.join(" ")}`);
+		} else if (entry.kind === "render") {
+			for (let im of entry.images) {
+				print(dim(`[Image ${im.number}, rendered by ${entry.author} from ${im.folder === "shared" ? "shared/" : ""}${im.source}, ${im.width}x${im.height}, about ${im.tokens} tokens]`));
+			}
 		} else if (entry.kind === "tool_op") {
 			print(paint(`(${entry.author} ${entry.summary})`, entry.is_error ? 31 : 2));
 		} else if (entry.kind === "error") {

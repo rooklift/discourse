@@ -17,6 +17,7 @@ const {PROVIDERS} = require("./config");
 const {build_system_prompt, clock_time} = require("./prompt");
 const {new_storage, make_file_tools, FILE_TOOL_NAMES, run_file_tool, LIMITS} = require("./storage");
 const {UTILITY_TOOLS, UTILITY_TOOL_NAMES, run_utility_tool, new_envelopes, describe_opened} = require("./utility_tools");
+const {make_render_tool, render_svg} = require("./render");
 
 const TOOLS = [
 	{
@@ -88,6 +89,7 @@ const CLOSING_PHRASES = {
 const MAX_CONSECUTIVE_ERRORS = 3;
 const MAX_TOOL_STEPS = 10;					// API calls per turn, when a model uses its file tools.
 const MAX_IMAGES = 20;						// Images the host can share per session; every request resends them all.
+const MAX_RENDERS = 10;						// Drawings the models can render per session, between them; likewise resent.
 
 // ------------------------------------------------------------------------------------------------
 
@@ -99,7 +101,7 @@ function new_room(cfg, backend, opts = {}) {
 	// One folder every model can use, beside their private ones.
 
 	let shared = cfg.storage_dir ? new_storage(cfg.storage_dir, "shared") : null;
-	let file_tools = shared ? make_file_tools(true) : [];
+	let file_tools = shared ? make_file_tools(true).concat([make_render_tool(true, MAX_RENDERS)]) : [];
 
 	Object.assign(room, {
 		cfg: cfg,
@@ -142,7 +144,9 @@ function new_room(cfg, backend, opts = {}) {
 		consecutive_errors: 0,
 
 		pending_host: [],						// Host messages ({text, images}) waiting for the current turn to finish.
-		image_count: 0,							// Images shared so far, for numbering.
+		image_count: 0,							// Images so far, the host's and rendered ones, for numbering.
+		host_image_count: 0,					// The host's images so far, for MAX_IMAGES.
+		render_count: 0,						// Drawings rendered so far, for MAX_RENDERS.
 		paused: false,
 		quiet: false,
 		awaiting_host: null,					// Name of the model that handed the floor to the host, if any.
@@ -481,6 +485,20 @@ const room_prototype = {
 				return `<notice>${entry.author} had the floor but said nothing.</notice>`;
 			}
 		}
+		if (entry.kind === "render") {
+
+			// Drawings from render_svg, posted after the turn that rendered them, so their
+			// author sees them too, at its next turn, like everyone else.
+
+			let mine = entry.author === me.name;
+			let blocks = [];
+			for (let im of entry.images) {
+				let where = im.folder === "shared" ? "the shared folder" : (mine ? "your private folder" : `${entry.author}'s private folder`);
+				blocks.push({type: "text", text: `<notice>Image ${im.number}, rendered by ${mine ? "you" : entry.author} from ${im.source} in ${where}:</notice>`});
+				blocks.push({type: "image", source: {type: "base64", media_type: im.media_type, data: im.data}});
+			}
+			return blocks;
+		}
 		if (entry.kind === "tool_op" && entry.announce && entry.author !== me.name) {
 			return `<notice>${entry.announce}</notice>`;
 		}
@@ -611,7 +629,7 @@ const room_prototype = {
 			}
 
 			let turn_text = steps.map(s => s.text).concat(response_text(response)).join("");
-			let step = this.make_step(p, response, turn_text, steps);
+			let step = await this.make_step(p, response, turn_text, steps);
 
 			if (this.closed) {						// Closed while running this step's tools (by an event
 				stop_quietly();						// listener): host_quit() has already recorded the turn.
@@ -693,7 +711,7 @@ const room_prototype = {
 	// steps before any tool runs or any event fires, so if a listener closes the room midway,
 	// host_quit() records it with whatever it has done so far.
 
-	make_step: function(p, response, turn_text, steps) {
+	make_step: async function(p, response, turn_text, steps) {
 
 		let usage = response.usage || {};
 		let cost = this.account(p, usage);
@@ -707,6 +725,7 @@ const room_prototype = {
 			blocks: [],
 			tool_results: [],
 			tool_ops: [],
+			renders: [],						// Drawings from render_svg, posted after the turn.
 			pass: false,
 			sit_out: false,
 			call_host: false,
@@ -773,6 +792,17 @@ const room_prototype = {
 				} else {
 					this.append({kind: "tool_op", author: p.name, tool: t.name, summary: r.summary, is_error: r.is_error, announce: ""});
 				}
+			} else if (t.name === "render_svg" && p.storage) {
+				used_tools = true;
+				let r;
+				try {
+					r = await this.run_render(p, t.input, step);
+				} catch (error) {						// It shouldn't throw, but a tool call must never end the session.
+					r = {content: "Error: the tool failed unexpectedly.", is_error: true, summary: "tool render_svg failed unexpectedly"};
+				}
+				step.tool_ops.push({tool: t.name, summary: r.summary, is_error: r.is_error});
+				step.tool_results.push({tool_use_id: t.id, content: r.content, is_error: r.is_error});
+				this.append({kind: "tool_op", author: p.name, tool: t.name, summary: r.summary, is_error: r.is_error, announce: ""});
 			} else if ((FILE_TOOL_NAMES.includes(t.name) && p.storage) || UTILITY_TOOL_NAMES.includes(t.name)) {
 				used_tools = true;
 				let r;
@@ -798,6 +828,54 @@ const room_prototype = {
 
 		step.ends_turn = !(used_tools && step.stop_reason === "tool_use" && !step.pass && !step.sit_out && !step.call_host && !step.leave);
 		return step;
+	},
+
+	// render_svg: draws an SVG file and adds it to the step's renders, which record_turn posts
+	// after the turn. Returns {content, is_error, summary}.
+
+	run_render: async function(p, input, step) {
+		input = (input && typeof input === "object") ? input : {};
+		let folder = input.folder === undefined || input.folder === null ? "private" : input.folder;
+		let shown = typeof input.filename === "string" ? JSON.stringify(input.filename.slice(0, 80)) : "";
+		let in_folder = folder === "shared" ? " in the shared folder" : "";
+		let fail = (message) => ({content: `Error: ${message}`, is_error: true, summary: `tried render_svg${shown ? ` on ${shown}` : ""}${in_folder}, error: ${message}`});
+
+		if (typeof input.filename !== "string") {
+			return fail("Say which file to draw, for example \"map.svg\".");
+		}
+		if (folder !== "private" && folder !== "shared") {
+			return fail("folder must be \"private\" or \"shared\".");
+		}
+		let storage = folder === "shared" ? this.shared_storage : p.storage;
+		if (!storage) {
+			return fail("There's no shared folder in this room.");
+		}
+		if (this.render_count >= MAX_RENDERS) {
+			return fail(`The room has already rendered ${MAX_RENDERS} drawings this session, which is its limit.`);
+		}
+
+		let file;
+		try {
+			file = storage.read(input.filename);
+		} catch (error) {
+			return fail(String(error?.message || error));
+		}
+		let image;
+		try {
+			image = await render_svg(file.text);
+		} catch (error) {
+			return fail(`${file.name} couldn't be drawn: ${String(error?.message || error)}`);
+		}
+
+		let number = ++this.image_count;
+		this.render_count++;
+		step.renders.push(Object.assign(image, {number, source: file.name, folder}));
+		let left = MAX_RENDERS - this.render_count;
+		return {
+			content: `Rendered ${file.name}${in_folder} as Image ${number} (${image.width}x${image.height}). It will be posted to the room after your message, and you'll see it then, along with everyone else. ${left === 0 ? "That was the room's last render this session." : `The room has ${left} render${left === 1 ? "" : "s"} left this session.`}`,
+			is_error: false,
+			summary: `rendered ${file.name}${in_folder} as Image ${number} (${image.width}x${image.height}, about ${image.tokens} tokens)`,
+		};
 	},
 
 	// call_host: the room waits for the host once the turn is recorded (see record_turn).
@@ -873,6 +951,9 @@ const room_prototype = {
 		if (sitting.length > 0) {
 			lines.push(`Sitting out until mentioned: ${sitting.join(", ")}.`);
 		}
+		if (this.cfg.storage_dir) {
+			lines.push(`Renders (render_svg): ${MAX_RENDERS - this.render_count} of ${MAX_RENDERS} left this session.`);
+		}
 		if (!for_host) {
 			lines.push(`Here: ${this.present_models().map(m => m.name).join(", ")}, and ${this.cfg.host_name} (the host, ${this.cfg.host_present ? "present, though they may not read everything as it happens" : "not watching live"}).`);
 			return {content: lines.join("\n"), is_error: false, summary: "checked the room status"};
@@ -929,6 +1010,14 @@ const room_prototype = {
 			cost: costs.includes(null) ? null : costs.reduce((a, b) => a + b, 0),
 			closing: this.closing,
 		});
+
+		// Drawings rendered this turn follow it. Not after a refusal, though: nothing from a refused
+		// turn reaches the others.
+
+		let renders = refusal ? [] : steps.flatMap(s => s.renders || []);
+		if (renders.length > 0) {
+			this.append({kind: "render", author: p.name, images: renders});
+		}
 
 		if (refusal) {
 			this.notice(`${p.name}'s API ended their reply with a refusal, so ${p.name} has been removed from the room for the rest of the session.${withheld ? " Nothing from that reply was passed on." : ""} The room carries on.`);
@@ -1071,13 +1160,14 @@ const room_prototype = {
 
 	images_left: function() {
 		let pending = this.pending_host.reduce((n, m) => n + (m.images || []).length, 0);
-		return MAX_IMAGES - this.image_count - pending;
+		return MAX_IMAGES - this.host_image_count - pending;
 	},
 
 	apply_pending_host_messages: function() {
 		while (this.pending_host.length > 0) {
 			let m = this.pending_host.shift();
 			let images = (m.images || []).map(im => Object.assign({}, im, {number: ++this.image_count}));
+			this.host_image_count += images.length;
 			let files = (m.files || []).map(f => ({name: f.name, text: f.text, lines: f.lines, tokens: f.tokens}));
 			let entry = {kind: "host", text: m.text};
 			if (images.length) {
@@ -1200,4 +1290,4 @@ function tool_result_block(tr) {
 	return block;
 }
 
-module.exports = {new_room, TOOLS, CALL_HOST_TOOL, MAX_IMAGES};
+module.exports = {new_room, TOOLS, CALL_HOST_TOOL, MAX_IMAGES, MAX_RENDERS};

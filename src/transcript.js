@@ -3,7 +3,8 @@
 // Writes two files per session, appending as events happen so nothing is lost on a crash:
 //   <stamp>.jsonl   Everything, including raw content blocks, usage and costs. One JSON object per line.
 //   <stamp>.md      A readable transcript.
-// plus, if the host shares images, a <stamp>-images folder holding each image as sent.
+// plus, if the host shares images or a model renders a drawing, a <stamp>-images folder holding
+// each image as sent.
 
 const fs = require("fs");
 const path = require("path");
@@ -44,14 +45,15 @@ function attach_transcript(room, cfg) {
 	// Images are saved as files and referenced by name, so the transcripts stay small.
 
 	let save_images = (entry) => {
-		if (entry.kind !== "host" || !entry.images || entry.images.length === 0) {
+		if ((entry.kind !== "host" && entry.kind !== "render") || !entry.images || entry.images.length === 0) {
 			return entry;
 		}
 		fs.mkdirSync(images_dir, {recursive: true});
 		let images = entry.images.map(im => {
 			let file = `image-${im.number}.${im.media_type === "image/png" ? "png" : "jpg"}`;
 			fs.writeFileSync(path.join(images_dir, file), Buffer.from(im.data, "base64"));
-			return {number: im.number, file: `${images_rel}/${file}`, source: im.source, media_type: im.media_type, width: im.width, height: im.height, tokens: im.tokens};
+			let saved = {number: im.number, file: `${images_rel}/${file}`, source: im.source, media_type: im.media_type, width: im.width, height: im.height, tokens: im.tokens};
+			return im.folder ? Object.assign(saved, {folder: im.folder}) : saved;
 		});
 		return Object.assign({}, entry, {images});
 	};
@@ -100,6 +102,10 @@ function markdown_for(entry, cfg) {
 			s += `<details open><summary>File: ${f.name}</summary>\n\n${f.text}\n\n</details>\n\n`;
 		}
 		return s;
+	}
+
+	if (entry.kind === "render") {
+		return entry.images.map(im => `![Image ${im.number}: ${im.source}${im.folder === "shared" ? " (shared)" : ""}, rendered by ${entry.author}](${encodeURI(im.file)})\n\n`).join("");
 	}
 
 	if (entry.kind === "tool_op") {
