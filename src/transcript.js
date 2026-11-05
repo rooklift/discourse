@@ -45,7 +45,7 @@ function attach_transcript(room, cfg) {
 	// Images are saved as files and referenced by name, so the transcripts stay small.
 
 	let save_images = (entry) => {
-		if ((entry.kind !== "host" && entry.kind !== "render") || !entry.images || entry.images.length === 0) {
+		if (!["host", "render", "library"].includes(entry.kind) || !entry.images || entry.images.length === 0) {
 			return entry;
 		}
 		fs.mkdirSync(images_dir, {recursive: true});
@@ -55,7 +55,11 @@ function attach_transcript(room, cfg) {
 			let saved = {number: im.number, file: `${images_rel}/${file}`, source: im.source, media_type: im.media_type, width: im.width, height: im.height, tokens: im.tokens};
 			return im.folder ? Object.assign(saved, {folder: im.folder}) : saved;
 		});
-		return Object.assign({}, entry, {images});
+		let out = Object.assign({}, entry, {images});
+		if (entry.items) {						// A library entry lists its images among its items too.
+			out.items = entry.items.map(it => it.kind === "image" ? Object.assign({kind: "image", name: it.name, description: it.description}, images.find(im => im.number === it.number)) : it);
+		}
+		return out;
 	};
 
 	room.on("event", (entry) => {
@@ -106,6 +110,12 @@ function markdown_for(entry, cfg) {
 
 	if (entry.kind === "render") {
 		return entry.images.map(im => `![Image ${im.number}: ${im.source}${im.folder === "shared" ? " (shared)" : ""}, rendered by ${entry.author}](${encodeURI(im.file)})\n\n`).join("");
+	}
+
+	if (entry.kind === "library") {
+		return entry.items.map(it => it.kind === "image"
+			? `![Image ${it.number}: ${it.name} (library), opened by ${entry.author}](${encodeURI(it.file)})\n\n`
+			: `<details><summary>Library: ${it.name}, opened by ${entry.author}</summary>\n\n${it.text}\n\n</details>\n\n`).join("");
 	}
 
 	if (entry.kind === "tool_op") {

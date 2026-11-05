@@ -70,6 +70,18 @@ What these checks guard against is the models, which can't create links, plus ac
 
 **Drawings.** `render_svg` lets a model draw: it writes an SVG file to its private folder or the shared one, then renders it. The image is posted to the room right after that model's message, labelled like yours ("Image 5, rendered by Argon from map.svg in the shared folder"), and every model sees it, the one who drew it included (at its next turn, since nobody sees an image mid-turn). Because the drawing is a file, a model can fix one detail with `edit_file` and render again, and several models can work on the same shared drawing. Each render is a snapshot, scaled so its longer side is 1,024 pixels (at most about 1,400 tokens) and flattened on white. The SVG is rendered from memory, never from a path, so links to files on your disk or to the web aren't followed; only `data:` images inside the SVG are drawn. At most 10 renders per session, counted separately from your 20 images; `room_status` tells the models how many are left. Renders are saved in the same `<session>-images` folder, and nothing from a turn that ended in a refusal is posted.
 
+**The library.** A folder of things you've collected from outside the room, for the models to open: public-domain texts, letters, tables, photographs, maps. Point `library_dir` at it (for instance `"../discourse_data/library"`) and list each item in its `index.txt`, one per line, as `filename: description`:
+
+```
+# Lines starting with # are ignored.
+before_the_law.txt: Franz Kafka, "Before the Law" (1915), a one-page parable; Ian Johnston's translation.
+lighthouse.jpg: A photograph of the Bell Rock lighthouse, about 1900, from the Library of Congress.
+```
+
+Only listed files are offered, so the folder can hold other things too. Filenames use letters, digits, `.`, `-` and `_`; files ending `.png`, `.jpg`, `.jpeg`, `.gif` or `.webp` are images (prepared like yours), and anything else is read as text, up to 50,000 characters (about 12,000 tokens; split anything longer into parts). Descriptions are at most 300 characters, and the description is all a model knows before opening an item, so say what it is and where it's from. Problems in the index (a missing file, a line with no description) are shown to you as warnings when the room opens; the rest of the library still works.
+
+The models are told the library exists and how many items it holds. `list_library` shows a model the catalogue (each item's name, kind, rough length and description, and whether it's been opened this session), privately. `open_library_item` shows an item to everyone: the others see it right after that model's message, like a file or image you share, and the opener gets a text straight away in its tool result (an image it sees after its turn, with everyone else). Each item can be opened once a session, and at most 10 per session in all, since every opened item is resent on every turn; `room_status` says how many are left. Opened items appear in your CLI, and in the Markdown transcript (texts folded away, images in the `<session>-images` folder). The models can't change the library.
+
 **Images.** You can share images with the room. Each is downscaled to about 1.2 megapixels, which keeps it to roughly 1,500 tokens and keeps requests small, since every request resends it; transparency is kept as PNG, everything else becomes JPEG. Every model sees it, labelled "Image 1", "Image 2" and so on. A large image costs about 2.4¢ for Opus's first look and 0.1¢ per later turn, half that for Sonnet, and almost nothing for Haiku. Each is saved alongside the transcript in a `<session>-images` folder, exactly as sent, and the transcript links to it. At most 20 per session.
 
 **Gemini and OpenAI models.** A model whose `model` ID starts with `gemini-` is called through Google's Interactions API, with the key from `google_api_key_file`; one whose `model` starts with `gpt-` goes through OpenAI's Responses API, with the key from `openai_api_key_file`. (Or set `"provider"` to `"google"` or `"openai"`.) The other models are told who made each one. For example:
@@ -110,6 +122,7 @@ For Gemini, use a key from a **paid** account. Google's terms say free-tier prom
 | `transcript_dir` | `./transcripts` | Where transcripts go. |
 | `word_list` | `./words.txt` | One word per line, for `--random`. Blank lines and lines starting with `#` are skipped. |
 | `storage_dir` | `./storage` | Each model gets a private folder in here, named by its model ID, plus one `shared` folder, all kept between sessions. `""` turns folders off. |
+| `library_dir` | `./library` | Your library (see "The library" above). Off if it's `""`, or if the default folder doesn't exist; a folder you name that doesn't exist gets a warning. |
 | `show_thinking` | `false` | Request thinking summaries, show them to you and save them. The system prompt tells the models which setting is in effect. |
 | `opening_message` | `""` | Optional first message from you. |
 | `wait_for_host` | `false` | With no opening message, wait for you to speak first (like `--wait`). Needs `host_present`. |
@@ -146,6 +159,7 @@ Each session writes `transcripts/<date>_<time>.md`, readable, and `.jsonl`, with
 * `src/utility_tools.js` and `src/calc.js`: dice, envelopes and the calculator.
 * `src/images.js` and `src/textfile.js`: preparing images and text files you share.
 * `src/render.js`: `render_svg`, drawing a model's SVG file.
+* `src/library.js`: the library's index, catalogue and items.
 * `src/config.js`, `src/prompt.js`, `src/pricing.js`, `src/transcript.js`, `src/words.js`
 * `cli.js`: terminal front end.
 * `test/test_room.js`: `npm test`. Runs the room against a scripted fake backend and checks every request against the API's structural rules; the Gemini and OpenAI backends are tested against a fake `fetch`.

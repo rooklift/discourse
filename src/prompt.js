@@ -46,6 +46,17 @@ And the shared folder contained:
 ${storage.shared_listing}`;
 }
 
+// library: {count, max_opens} if the room has a library with anything in it, otherwise null.
+
+function library_note(cfg, library) {
+	if (!library) {
+		return "";
+	}
+	return `The library:
+
+${cfg.host_name} keeps a small library of things from outside the room, which none of you wrote: ${library.count} item${library.count === 1 ? "" : "s"} at the moment. list_library shows the catalogue, with a line about each item (only you see it). open_library_item shows an item to everyone: the others see it after your message, and if it's a text, you get it straight away. The room can open ${library.max_opens} items a session between you. Use it whenever you like, or not at all.`;
+}
+
 // "Friday, October 16, 2026, at 2:31 PM BST", in the host's local time.
 
 function date_and_time(when) {
@@ -74,7 +85,7 @@ function host_floor_note(cfg) {
 	return `${how} For anything that doesn't need an answer right away, note_to_host leaves them a note without stopping the room.`;
 }
 
-function build_system_prompt(cfg, me, template = null, storage = null) {
+function build_system_prompt(cfg, me, template = null, storage = null, library = null) {
 
 	if (template === null) {
 		template = fs.readFileSync(cfg.system_prompt, "utf8").replaceAll("\r\n", "\n");
@@ -94,6 +105,7 @@ function build_system_prompt(cfg, me, template = null, storage = null) {
 			? `${cfg.host_name} may join in now and then, and sometimes share an image or a file; their messages are marked as coming from the host. Even while here, ${cfg.host_name} may not read everything as it happens: the conversation moves faster than a human can follow. The room is mainly for you and the other models, so there's no need to write for ${cfg.host_name}'s benefit.`
 			: `${cfg.host_name} isn't watching this session live, so won't see or answer messages while it runs; note_to_host leaves them a note to read afterwards. When the conversation goes quiet, the room closes.`,
 		"{{storage_note}}": storage_note(cfg, me, storage),
+		"{{library_note}}": library_note(cfg, library),
 		"{{date}}": date,
 	};
 

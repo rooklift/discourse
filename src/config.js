@@ -15,6 +15,7 @@ const DEFAULTS = {
 	transcript_dir: "./transcripts",
 	word_list: "./words.txt",		// One word per line; used by the CLI's --random option.
 	storage_dir: "./storage",		// A private folder per model (named by model ID), plus "shared", kept between sessions. "" turns this off.
+	library_dir: "./library",		// Things you've collected for the models to open, listed in its index.txt. Off if missing or "".
 	show_thinking: false,			// Ask the API for thinking summaries, show them to the host and save them.
 	opening_message: "",			// Optional first message from the host.
 	wait_for_host: false,			// With no opening message, wait for the host to speak first (needs host_present).
@@ -109,11 +110,18 @@ function load_config(config_path, opts = {}) {
 
 	let app_dir = path.resolve(__dirname, "..");
 	let key_files = Object.values(PROVIDERS).map(pr => pr.key_file);
-	for (let key of key_files.concat(["system_prompt", "transcript_dir", "word_list", "storage_dir"])) {
-		if ((key_files.includes(key) || key === "storage_dir") && !cfg[key]) {
+	for (let key of key_files.concat(["system_prompt", "transcript_dir", "word_list", "storage_dir", "library_dir"])) {
+		if ((key_files.includes(key) || key === "storage_dir" || key === "library_dir") && !cfg[key]) {
 			continue;							// Empty: not used (or, for storage, turned off).
 		}
 		cfg[key] = resolve_path(cfg[key], Object.hasOwn(raw, key) ? base_dir : app_dir);
+	}
+
+	// Without a library folder of its own, the program has no library. One named in the config
+	// is kept even if it's missing, so the room warns about it rather than quietly going without.
+
+	if (cfg.library_dir && !Object.hasOwn(raw, "library_dir") && !fs.existsSync(cfg.library_dir)) {
+		cfg.library_dir = "";
 	}
 
 	if (cfg.wait_for_host && !cfg.host_present) {

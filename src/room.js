@@ -18,6 +18,7 @@ const {build_system_prompt, clock_time} = require("./prompt");
 const {new_storage, make_file_tools, FILE_TOOL_NAMES, run_file_tool, LIMITS} = require("./storage");
 const {UTILITY_TOOLS, UTILITY_TOOL_NAMES, run_utility_tool, new_envelopes, describe_opened} = require("./utility_tools");
 const {make_render_tool, render_svg} = require("./render");
+const {load_library, find_item, catalogue, prepare_item, LIBRARY_TOOLS, LIBRARY_TOOL_NAMES} = require("./library");
 
 const TOOLS = [
 	{
@@ -90,6 +91,7 @@ const MAX_CONSECUTIVE_ERRORS = 3;
 const MAX_TOOL_STEPS = 10;					// API calls per turn, when a model uses its file tools.
 const MAX_IMAGES = 20;						// Images the host can share per session; every request resends them all.
 const MAX_RENDERS = 10;						// Drawings the models can render per session, between them; likewise resent.
+const MAX_LIBRARY_OPENS = 10;				// Library items the models can open per session, between them; likewise resent.
 
 // ------------------------------------------------------------------------------------------------
 
@@ -103,11 +105,20 @@ function new_room(cfg, backend, opts = {}) {
 	let shared = cfg.storage_dir ? new_storage(cfg.storage_dir, "shared") : null;
 	let file_tools = shared ? make_file_tools(true).concat([make_render_tool(true, MAX_RENDERS)]) : [];
 
+	// The host's library, if there's one with anything in it.
+
+	let library = cfg.library_dir ? load_library(cfg.library_dir) : null;
+	let library_tools = library && library.items.length > 0 ? LIBRARY_TOOLS : [];
+	let library_info = library_tools.length > 0 ? {count: library.items.length, max_opens: MAX_LIBRARY_OPENS} : null;
+
 	Object.assign(room, {
 		cfg: cfg,
 		backend: backend,
 		shared_storage: shared,
 		envelopes: new_envelopes(),				// Secrets the room keeps; this session only.
+		library: library_tools.length > 0 ? library : null,
+		library_problems: library ? library.problems : [],
+		library_opened: new Map(),				// Lowercase item name -> who opened it, this session.
 		random: opts.random || Math.random,		// Injectable for tests.
 
 		participants: cfg.participants.map(p => {
@@ -117,8 +128,8 @@ function new_room(cfg, backend, opts = {}) {
 				name: p.name,
 				cfg: p,
 				storage: storage,					// Private folder, or null if storage is off.
-				tools: TOOLS.concat(cfg.host_present && (cfg.host_summoning || "tool") !== "mention" ? [CALL_HOST_TOOL] : [], UTILITY_TOOLS, storage ? file_tools : []),
-				system: build_system_prompt(cfg, p, opts.template ?? null, storage_info),
+				tools: TOOLS.concat(cfg.host_present && (cfg.host_summoning || "tool") !== "mention" ? [CALL_HOST_TOOL] : [], UTILITY_TOOLS, storage ? file_tools : [], library_tools),
+				system: build_system_prompt(cfg, p, opts.template ?? null, storage_info, library_info),
 				present: true,
 				sitting_out: false,					// True after sit_out, until someone @mentions this model.
 				last_spoke: -1,						// Value of message_count when this model last spoke.
@@ -303,6 +314,9 @@ const room_prototype = {
 	open: function() {
 		let names = this.participants.map(p => p.name);
 		this.notice(`The room is open. Here: ${names.join(", ")}, and ${this.cfg.host_name} (the host).`);
+		for (let problem of this.library_problems) {
+			this.warn(`Library: ${problem}`);
+		}
 		if (this.cfg.first_speaker) {
 			this.floor_queue.push(this.cfg.first_speaker);
 		}
@@ -496,6 +510,23 @@ const room_prototype = {
 				let where = im.folder === "shared" ? "the shared folder" : (mine ? "your private folder" : `${entry.author}'s private folder`);
 				blocks.push({type: "text", text: `<notice>Image ${im.number}, rendered by ${mine ? "you" : entry.author} from ${im.source} in ${where}:</notice>`});
 				blocks.push({type: "image", source: {type: "base64", media_type: im.media_type, data: im.data}});
+			}
+			return blocks;
+		}
+		if (entry.kind === "library") {
+
+			// Items opened from the library, posted after the turn that opened them. The opener
+			// already has a text in its tool result, so it sees only the images here.
+
+			let mine = entry.author === me.name;
+			let blocks = [];
+			for (let it of entry.items) {
+				if (it.kind === "image") {
+					blocks.push({type: "text", text: `<notice>Image ${it.number}, from the library, opened by ${mine ? "you" : entry.author}: ${it.name}, ${it.description}</notice>`});
+					blocks.push({type: "image", source: {type: "base64", media_type: it.media_type, data: it.data}});
+				} else if (!mine) {
+					blocks.push({type: "text", text: `<notice>${entry.author} opened ${it.name} from the library: ${it.description}</notice>\n<file name="${it.name}">\n${it.text}\n</file>`});
+				}
 			}
 			return blocks;
 		}
@@ -726,6 +757,7 @@ const room_prototype = {
 			tool_results: [],
 			tool_ops: [],
 			renders: [],						// Drawings from render_svg, posted after the turn.
+			library: [],						// Items opened from the library, likewise.
 			pass: false,
 			sit_out: false,
 			call_host: false,
@@ -792,6 +824,17 @@ const room_prototype = {
 				} else {
 					this.append({kind: "tool_op", author: p.name, tool: t.name, summary: r.summary, is_error: r.is_error, announce: ""});
 				}
+			} else if (LIBRARY_TOOL_NAMES.includes(t.name) && this.library) {
+				used_tools = true;
+				let r;
+				try {
+					r = t.name === "list_library" ? this.list_library() : await this.open_library_item(p, t.input, step);
+				} catch (error) {						// They shouldn't throw, but a tool call must never end the session.
+					r = {content: "Error: the tool failed unexpectedly.", is_error: true, summary: `tool ${t.name} failed unexpectedly`};
+				}
+				step.tool_ops.push({tool: t.name, summary: r.summary, is_error: r.is_error});
+				step.tool_results.push({tool_use_id: t.id, content: r.content, is_error: r.is_error});
+				this.append({kind: "tool_op", author: p.name, tool: t.name, summary: r.summary, is_error: r.is_error, announce: ""});
 			} else if (t.name === "render_svg" && p.storage) {
 				used_tools = true;
 				let r;
@@ -878,6 +921,72 @@ const room_prototype = {
 		};
 	},
 
+	// The library. list_library is private; open_library_item adds the item to the step's library
+	// list, which record_turn posts after the turn. Each returns {content, is_error, summary}.
+
+	library_opens_left: function() {
+		return MAX_LIBRARY_OPENS - this.library_opened.size;
+	},
+
+	list_library: function() {
+		let left = this.library_opens_left();
+		let n = this.library.items.length;
+		return {
+			content: `The library has ${n} item${n === 1 ? "" : "s"}, collected by ${this.cfg.host_name}:\n\n${catalogue(this.library, this.library_opened)}\n\n${left > 0 ? `${left} more can be opened this session, with open_library_item.` : "The room has opened as many items as it can this session."}`,
+			is_error: false,
+			summary: "looked at the library catalogue",
+		};
+	},
+
+	open_library_item: async function(p, input, step) {
+		let filename = input && typeof input === "object" ? input.filename : undefined;
+		let shown = typeof filename === "string" ? JSON.stringify(filename.slice(0, 80)) : "";
+		let fail = (message) => ({content: `Error: ${message}`, is_error: true, summary: `tried to open ${shown || "an item"} from the library, error: ${message}`});
+
+		if (typeof filename !== "string") {
+			return fail("Say which item to open, by its filename in the catalogue.");
+		}
+		let item = find_item(this.library, filename);
+		if (!item) {
+			return fail(`There's no item called ${filename.slice(0, 100)} in the library. list_library shows what there is.`);
+		}
+		let who = this.library_opened.get(item.name.toLowerCase());
+		if (who) {
+			return fail(`${item.name} has already been opened this session, by ${who === p.name ? "you" : who}, so it's already in everyone's view, above.`);
+		}
+		if (this.library_opens_left() <= 0) {
+			return fail(`The room has already opened ${MAX_LIBRARY_OPENS} items from the library this session, which is its limit.`);
+		}
+
+		let ready;
+		try {
+			ready = await prepare_item(item);
+		} catch (error) {
+			this.warn(`Library: ${item.name} couldn't be opened: ${String(error?.message || error)}`);
+			return fail(`${item.name} couldn't be opened. ${this.cfg.host_name} has been told.`);
+		}
+
+		this.library_opened.set(item.name.toLowerCase(), p.name);
+		if (ready.kind === "image") {
+			ready.number = ++this.image_count;
+		}
+		step.library.push(ready);
+		let left = this.library_opens_left();
+		let left_note = left === 0 ? "That was the room's last opening this session." : `The room can open ${left} more item${left === 1 ? "" : "s"} this session.`;
+		if (ready.kind === "image") {
+			return {
+				content: `You opened ${item.name} from the library. It will be shown to everyone, you included, after your message, as Image ${ready.number}. ${left_note}`,
+				is_error: false,
+				summary: `opened ${item.name} from the library, as Image ${ready.number} (${ready.width}x${ready.height}, about ${ready.tokens} tokens)`,
+			};
+		}
+		return {
+			content: `You opened ${item.name} from the library. The others will see it after your message. ${left_note} Here it is:\n\n<file name="${item.name}">\n${ready.text}\n</file>`,
+			is_error: false,
+			summary: `opened ${item.name} from the library (about ${ready.tokens} tokens)`,
+		};
+	},
+
 	// call_host: the room waits for the host once the turn is recorded (see record_turn).
 
 	call_host_reply: function(turn_text) {
@@ -954,6 +1063,9 @@ const room_prototype = {
 		if (this.cfg.storage_dir) {
 			lines.push(`Renders (render_svg): ${MAX_RENDERS - this.render_count} of ${MAX_RENDERS} left this session.`);
 		}
+		if (this.library) {
+			lines.push(`Library: ${this.library_opens_left()} of ${MAX_LIBRARY_OPENS} openings left this session.`);
+		}
 		if (!for_host) {
 			lines.push(`Here: ${this.present_models().map(m => m.name).join(", ")}, and ${this.cfg.host_name} (the host, ${this.cfg.host_present ? "present, though they may not read everything as it happens" : "not watching live"}).`);
 			return {content: lines.join("\n"), is_error: false, summary: "checked the room status"};
@@ -1017,6 +1129,14 @@ const room_prototype = {
 		let renders = refusal ? [] : steps.flatMap(s => s.renders || []);
 		if (renders.length > 0) {
 			this.append({kind: "render", author: p.name, images: renders});
+		}
+		let opened = steps.flatMap(s => s.library || []);
+		if (refusal) {
+			for (let it of opened) {					// Never shown, so anyone may still open it.
+				this.library_opened.delete(it.name.toLowerCase());
+			}
+		} else if (opened.length > 0) {
+			this.append({kind: "library", author: p.name, items: opened, images: opened.filter(it => it.kind === "image")});
 		}
 
 		if (refusal) {
@@ -1290,4 +1410,4 @@ function tool_result_block(tr) {
 	return block;
 }
 
-module.exports = {new_room, TOOLS, CALL_HOST_TOOL, MAX_IMAGES, MAX_RENDERS};
+module.exports = {new_room, TOOLS, CALL_HOST_TOOL, MAX_IMAGES, MAX_RENDERS, MAX_LIBRARY_OPENS};

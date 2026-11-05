@@ -93,6 +93,9 @@ function validate_request(req) {
 	}
 	assert.strictEqual(typeof req.system, "string");
 	let names = req.tools.map(t => t.name).filter(n => n !== "call_host");	// Only offered when the host is present.
+	let library = names.filter(n => n === "list_library" || n === "open_library_item");
+	assert(library.length === 0 || (library.length === 2 && names.slice(-2).join() === "list_library,open_library_item"), "both library tools, last, or neither");
+	names = names.filter(n => !library.includes(n));
 	assert.deepStrictEqual(names.slice(0, 11), ["pass", "leave_room", "sit_out", "note_to_host", "room_status", "roll_dice", "shuffle", "calculate", "create_envelope", "open_envelope", "peek_envelope"]);
 	assert.strictEqual(new Set(names).size, names.length, "tool names are unique");
 	assert(names.length === 11 || (names.length === 20 && names[19] === "render_svg"), "either no file tools, or all eight and render_svg");
@@ -2813,6 +2816,172 @@ test("render_svg: errors, the session limit, numbering shared with the host's im
 	assert.strictEqual(over.content, `Error: The room has already rendered ${MAX_RENDERS} drawings this session, which is its limit.`);
 	let no_name = await room.run_render(room.get_participant("Opus"), {}, {renders: []});
 	assert.strictEqual(no_name.content, "Error: Say which file to draw, for example \"map.svg\".");
+});
+
+// ------------------------------------------------------------------------------------------------
+// The library: things the host has collected, for the models to open.
+
+const {load_library, catalogue, find_item} = require("../src/library");
+const {MAX_LIBRARY_OPENS} = require("../src/room");
+
+async function make_library(entries, files) {
+	let dir = temp_dir();
+	for (let [name, content] of Object.entries(files)) {
+		if (content === "IMAGE") {
+			await make_image(dir, name, 300, 200);
+		} else {
+			fs.writeFileSync(path.join(dir, name), content);
+		}
+	}
+	fs.writeFileSync(path.join(dir, "index.txt"), entries.join("\n"));
+	return dir;
+}
+
+const PARABLE = "Before the law sits a gatekeeper. " + "word ".repeat(140);
+
+test("library: the index is parsed, every listed file is checked, and problems are reported", async () => {
+	let dir = await make_library([
+		"# A comment, and a blank line next.",
+		"",
+		"parable.txt: A parable about a gatekeeper.",
+		"lighthouse.jpg: A photograph of a lighthouse.",
+		"Parable.txt: The same file, listed twice.",
+		"no colon here",
+		"../escape.txt: Outside the folder.",
+		"missing.txt: Not there.",
+		"empty_desc.txt:",
+		"long.txt: Too long.",
+		"index.txt: The index itself.",
+		"linked.txt: A symlink.",
+		"notes.md: Spaces after the colon  ",
+	], {"parable.txt": PARABLE, "lighthouse.jpg": "IMAGE", "long.txt": "x".repeat(50001), "notes.md": "Some notes.\r\n"});
+	fs.symlinkSync(path.join(dir, "parable.txt"), path.join(dir, "linked.txt"));
+
+	let lib = load_library(dir);
+	assert.deepStrictEqual(lib.items.map(it => [it.name, it.kind]), [["parable.txt", "text"], ["lighthouse.jpg", "image"], ["notes.md", "text"]]);
+	assert.strictEqual(lib.items[2].description, "Spaces after the colon");
+	assert.strictEqual(lib.items[2].text, "Some notes.");
+	let problems = lib.problems.join("\n");
+	for (let expected of ["line 5: Parable.txt is listed twice", "line 6: expected \"filename: description\"", "line 7: \"../escape.txt\" isn't a usable filename",
+		"line 8: there's no file called missing.txt", "line 9: empty_desc.txt has no description", "line 10: long.txt is too long (50001 characters; at most 50000)",
+		"line 11: \"index.txt\" isn't a usable filename", "line 12: linked.txt isn't a plain file"]) {
+		assert(problems.includes(expected), `${expected}\n---\n${problems}`);
+	}
+	assert(!problems.includes(dir), "messages name files, not the host's paths");
+
+	let opened = new Map([["lighthouse.jpg", "Sol"]]);
+	assert.strictEqual(catalogue(lib, opened), [
+		"- parable.txt (text, about 150 words): A parable about a gatekeeper.",
+		"- lighthouse.jpg (image; opened by Sol this session): A photograph of a lighthouse.",
+		"- notes.md (text, about 2 words): Spaces after the colon",
+	].join("\n"));
+	assert.strictEqual(find_item(lib, "PARABLE.TXT").name, "parable.txt", "names are case-insensitive");
+
+	assert.deepStrictEqual(load_library(path.join(dir, "nowhere")).problems, [`The library folder ${path.join(dir, "nowhere")} doesn't exist.`]);
+	let bare = temp_dir();
+	assert.deepStrictEqual(load_library(bare).problems, ["The library folder has no index.txt, so it's empty."]);
+});
+
+test("library in the room: browsed privately, opened for everyone, and saved for the host", async () => {
+	let dir = await make_library(["parable.txt: A parable about a gatekeeper.", "lighthouse.jpg: A photograph of a lighthouse.", "broken.png: Not really an image.", "bad line"],
+		{"parable.txt": PARABLE, "lighthouse.jpg": "IMAGE", "broken.png": "not an image"});
+	let results = [];
+	let backend = fake_backend((name, req, n) => {
+		results.push(...req.messages[req.messages.length - 1].content.filter(b => b.type === "tool_result").map(b => b.content));
+		if (name === "Opus" && n === 0) return file_step(tool("list_library", {}), tool("open_library_item", {filename: "Parable.txt"}), tool("open_library_item", {filename: "lighthouse.jpg"}), tool("open_library_item", {filename: "broken.png"}));
+		if (name === "Opus" && n === 1) return speak("Two things from the shelf.");
+		if (name === "Sonnet" && n === 0) return file_step(tool("open_library_item", {filename: "parable.txt"}), tool("open_library_item", {filename: "nothing.txt"}));
+		return speak(`${name} ${n}`);
+	});
+	let cfg = make_cfg({library_dir: dir, max_turns: 4, farewell_round: false, first_speaker: "Opus", transcript_dir: temp_dir()});
+	let room = new_room(cfg, backend, {template: "x {{library_note}}", random: () => 0});
+	let files = require("../src/transcript").attach_transcript(room, cfg);
+	await room.run();
+
+	let system = backend.calls[0].req.system;
+	assert(system.includes("Host keeps a small library of things from outside the room, which none of you wrote: 3 items at the moment."), system);
+	assert(system.includes(`The room can open ${MAX_LIBRARY_OPENS} items a session between you.`));
+	assert(room.log.some(e => e.kind === "warning" && e.text === "Library: index.txt line 4: expected \"filename: description\"."), "index problems are shown to the host");
+
+	assert(results[0].startsWith("The library has 3 items, collected by Host:\n\n- parable.txt (text, about 150 words): A parable about a gatekeeper."), results[0]);
+	assert(results[1].startsWith("You opened parable.txt from the library. The others will see it after your message.") && results[1].includes(`<file name="parable.txt">\n${PARABLE.trim()}\n</file>`), "the opener gets the text at once");
+	assert(results[2].startsWith("You opened lighthouse.jpg from the library. It will be shown to everyone, you included, after your message, as Image 1."), results[2]);
+	assert.strictEqual(results[3], "Error: broken.png couldn't be opened. Host has been told.");
+	assert(room.log.some(e => e.kind === "warning" && e.text.startsWith("Library: broken.png couldn't be opened: Couldn't read")));
+	assert(results.includes("Error: parable.txt has already been opened this session, by Opus, so it's already in everyone's view, above."));
+	assert(results.includes("Error: There's no item called nothing.txt in the library. list_library shows what there is."));
+
+	let kinds = room.log.map(e => e.kind);
+	assert.strictEqual(kinds.indexOf("library"), kinds.indexOf("turn") + 1, "posted right after the turn");
+	let sonnet = backend.calls.find(c => c.name === "Sonnet").req.messages.flatMap(m => m.content);
+	let text = sonnet.filter(b => b.type === "text").map(b => b.text).join("\n");
+	assert(text.includes(`<message from="Opus">\nTwo things from the shelf.\n</message>\n\n<notice>Opus opened parable.txt from the library: A parable about a gatekeeper.</notice>\n<file name="parable.txt">\n${PARABLE.trim()}\n</file>`), text.slice(0, 600));
+	assert(text.includes("<notice>Image 1, from the library, opened by Opus: lighthouse.jpg, A photograph of a lighthouse.</notice>"));
+	assert.strictEqual(sonnet.filter(b => b.type === "image").length, 1);
+	assert(!text.includes("The library has 3 items"), "the catalogue stays private");
+
+	let opus_later = backend.calls.filter(c => c.name === "Opus")[2].req.messages;
+	let own = opus_later.findIndex(m => m.role === "assistant" && JSON.stringify(m.content).includes("Two things from the shelf."));
+	let after = opus_later[own + 1].content;
+	assert(after.some(b => b.type === "text" && b.text.includes("Image 1, from the library, opened by you")) && after.some(b => b.type === "image"), "the opener sees the image after its turn");
+	assert.strictEqual(JSON.stringify(after).split("Before the law sits").length - 1, 0, "but isn't sent the text a second time");
+
+	assert(room.status_for(room.get_participant("Haiku")).content.includes(`Library: ${MAX_LIBRARY_OPENS - 2} of ${MAX_LIBRARY_OPENS} openings left this session.`));
+	assert(room.list_library().content.includes("- parable.txt (text, about 150 words; opened by Opus this session)"));
+
+	let jsonl = fs.readFileSync(files.jsonl_path, "utf8");
+	let photo = room.log.find(e => e.kind === "library").images[0].data;
+	assert(!jsonl.includes(photo.slice(0, 100)), "no image data in the JSONL");
+	let entry = jsonl.trim().split("\n").map(JSON.parse).find(e => e.kind === "library");
+	assert(entry.items[1].file.endsWith("-images/image-1.jpg") && entry.items[1].name === "lighthouse.jpg");
+	let md = fs.readFileSync(files.md_path, "utf8");
+	assert(md.includes("<details><summary>Library: parable.txt, opened by Opus</summary>"));
+	assert(md.includes(`![Image 1: lighthouse.jpg (library), opened by Opus](${entry.items[1].file})`));
+	assert(md.includes("Opus opened parable.txt from the library (about"));
+});
+
+test("library: a refused turn's item is never shown and can still be opened; the session limit; no library, no tools", async () => {
+	let dir = await make_library(["parable.txt: A parable.", "other.txt: Another."], {"parable.txt": PARABLE, "other.txt": "Something else."});
+	let backend = fake_backend((name, req, n) => {
+		if (name === "Opus" && n === 0) return file_step(tool("open_library_item", {filename: "parable.txt"}));
+		if (name === "Opus" && n === 1) return {content: [], stop_reason: "refusal", usage: usage()};
+		if (name === "Sonnet" && n === 0) return file_step(tool("open_library_item", {filename: "parable.txt"}));
+		return speak(`${name} ${n}`);
+	});
+	let room = new_room(make_cfg({library_dir: dir, max_turns: 3, farewell_round: false, first_speaker: "Opus"}), backend, {template: "x", random: () => 0});
+	await room.run();
+	let posted = room.log.filter(e => e.kind === "library");
+	assert.deepStrictEqual(posted.map(e => [e.author, e.items.map(it => it.name)]), [["Sonnet", ["parable.txt"]]], "Sonnet could open what Opus's refused turn had opened");
+	assert(!backend.calls.filter(c => c.name === "Haiku").some(c => JSON.stringify(c.req.messages).includes("Opus opened parable.txt")));
+
+	for (let i = room.library_opened.size; i < MAX_LIBRARY_OPENS; i++) {
+		room.library_opened.set(`filler-${i}`, "Haiku");
+	}
+	let over = await room.open_library_item(room.get_participant("Haiku"), {filename: "other.txt"}, {library: []});
+	assert.strictEqual(over.content, `Error: The room has already opened ${MAX_LIBRARY_OPENS} items from the library this session, which is its limit.`);
+	assert(room.list_library().content.endsWith("The room has opened as many items as it can this session."));
+
+	let empty = await make_library(["# Nothing yet."], {});
+	let none = new_room(make_cfg({library_dir: empty}), fake_backend(() => speak("hi")), {template: "x {{library_note}}", random: () => 0});
+	assert(!none.participants[0].tools.some(t => t.name === "list_library"), "an empty library offers no tools");
+	assert.strictEqual(none.participants[0].system, "x", "and isn't mentioned");
+});
+
+test("library_dir: the default is off if missing; one named in the config is warned about if missing", () => {
+	let dir = temp_dir();
+	let write = (extra) => {
+		let file = path.join(dir, `config-${Object.keys(extra).length}.json`);
+		fs.writeFileSync(path.join(dir, "key.txt"), "k");
+		fs.writeFileSync(file, JSON.stringify(Object.assign({anthropic_api_key_file: "key.txt", storage_dir: "", models: {Opus: {model: "claude-opus-5-5"}, Haiku: {model: "claude-haiku-5-5"}}}, extra)));
+		return file;
+	};
+	let {load_config} = require("../src/config");
+	assert.strictEqual(load_config(write({})).library_dir, "", "no library beside the program, so none");
+	let named = load_config(write({library_dir: "shelf"}));
+	assert.strictEqual(named.library_dir, path.join(dir, "shelf"), "relative to the config, and kept although it's missing");
+	let room = new_room(Object.assign(make_cfg(), {library_dir: named.library_dir}), fake_backend(() => speak("hi")), {template: "x", random: () => 0});
+	room.open();
+	assert(room.log.some(e => e.kind === "warning" && e.text === `Library: The library folder ${named.library_dir} doesn't exist.`));
 });
 
 // ------------------------------------------------------------------------------------------------
