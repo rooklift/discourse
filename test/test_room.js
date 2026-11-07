@@ -2999,115 +2999,153 @@ function checked_cfg(overrides = {}) {
 	return cfg;
 }
 
-test("leak check: exact public turn text, no history or private blocks, and no publication before approval", async () => {
+let verdict = (leaked) => speak(JSON.stringify({leaked_thinking: leaked}));
+
+test("leak check: only the turn's text, with tool markers, is checked; tools announce at once, text waits for approval", async () => {
 	let checked = [];
 	let room;
 	let backend = fake_backend((name, req, n) => {
 		if (name === "Leak checker") {
-			let text = last_user_text(req);
-			checked.push(text);
-			assert(!JSON.stringify(req).includes("PRIVATE_THOUGHT"));
-			assert(!text.includes("PRIVATE_NOTE"));
-			assert(!text.includes("OLD_HISTORY"));
-			assert(!room.log.some(e => e.author === "Opus" && ["turn", "tool_op"].includes(e.kind)), "nothing public has been appended yet");
-			assert(!JSON.stringify(room.build_view(room.participants[1])).includes("public reply"));
-			return speak('{"leaked_thinking": false}');
+			checked.push(last_user_text(req));
+			assert.strictEqual(req.messages.length, 1);
+			assert.deepStrictEqual(req.tools, []);
+			assert(!JSON.stringify(req).includes("PRIVATE_"));
+			assert(!JSON.stringify(req).includes("OLD_HISTORY"));
+			let view = JSON.stringify(room.build_view(room.participants[1]));
+			assert(view.includes("Opus shuffled"), "tool announcements aren't held");
+			assert(!view.includes("public reply"), "the text is held until approved");
+			assert(!view.includes("first part"));
+			return verdict(false);
 		}
-		if (n === 0) return file_step(tool("shuffle", {items: ["red", "blue"]}), tool("note_to_host", {note: "PRIVATE_NOTE"}));
+		if (n === 0) return file_step({type: "text", text: "first part"}, tool("shuffle", {items: ["red", "blue"]}), tool("note_to_host", {note: "PRIVATE_NOTE"}));
 		return speak("  public reply  ", [{type: "thinking", thinking: "PRIVATE_THOUGHT", signature: "private"}]);
 	});
 	room = new_room(checked_cfg(), backend, {template: "x", random: () => 0});
 	room.open();
 	room.host_say("OLD_HISTORY");
 	room.apply_pending_host_messages();
-	let start = room.log.length;
 	await room.take_turn(room.participants[0]);
-	let expected = room.log.slice(start).map(e => room.render_for(e, room.participants[1])).filter(Boolean).join("\n\n");
-	assert.deepStrictEqual(checked, [expected]);
-	assert(expected.includes("Opus shuffled"));
-	assert(expected.endsWith('<message from="Opus">\npublic reply\n</message>'));
+	assert.deepStrictEqual(checked, ["first part\n\n[Opus used a tool]\n\npublic reply"]);
 	assert(room.participants[0].present);
+	assert.strictEqual(turns(room)[0].action, "speak");
+	assert(JSON.stringify(room.build_view(room.participants[1])).includes("first part\\n\\npublic reply"));
 	assert(room.leak_checker.cost > 0);
 	assert.strictEqual(room.total_cost, room.participants[0].cost + room.leak_checker.cost);
 	assert.strictEqual(room.cost_by_provider()[0].cost, room.total_cost);
 });
 
-test("leak check: yes, invalid output and API errors reject the whole turn and the room continues", async () => {
-	let responses = [
-		speak('{"leaked_thinking": true}'), speak("no"), speak("```json\n{\"leaked_thinking\": false}\n```"),
-		speak('{"leaked_thinking": "false"}'), speak('{"leaked_thinking": false, "reason": "safe"}'),
-		speak("null"), speak("[]"), speak(""),
-		Object.assign(speak('{"leaked_thinking": false}'), {stop_reason: "max_tokens"}),
-		Object.assign(speak('{"leaked_thinking": false}'), {stop_reason: "refusal"}),
-		new Error("checker unavailable"),
-	];
-	for (let response of responses) {
+test("leak check: a positive verdict, or two failed checks, withhold the text and remove the model; tool effects stand", async () => {
+	let bad = [speak("no"), speak('{"leaked_thinking": "false"}'), speak('{"leaked_thinking": false, "reason": "safe"}'),
+		speak("null"), speak("[]"), speak(""), speak("true"),
+		Object.assign(verdict(false), {stop_reason: "max_tokens"}),
+		Object.assign(verdict(false), {stop_reason: "refusal"}),
+		new Error("checker unavailable")];
+	let cases = [[verdict(true)], [new Error("checker unavailable"), verdict(true)]].concat(bad.map(b => [b, b]));
+	for (let responses of cases) {
 		let room;
 		let backend = fake_backend((name, req, n) => {
 			if (name === "Leak checker") {
-				assert(last_user_text(req).includes("LEAKED_LABEL"));
-				if (response instanceof Error) throw response;
-				return response;
+				assert.strictEqual(last_user_text(req), "[Opus used a tool]\n\nLEAKED_REPLY @Sonnet\n\n[Opus used a tool]");
+				let r = responses[n];
+				if (r instanceof Error) throw r;
+				return r;
 			}
-			if (name === "Opus" && n === 0) return file_step(tool("create_envelope", {label: "LEAKED_LABEL", content: "LEAKED_SECRET", sealed: true}));
+			if (name === "Opus" && n === 0) return file_step(tool("create_envelope", {label: "KEPT_LABEL", content: "KEPT_CONTENT", sealed: true}));
 			if (name === "Opus") return call_host("LEAKED_REPLY @Sonnet");
 			return speak("still here");
 		});
 		room = new_room(checked_cfg({host_present: true, max_turns: 3, farewell_round: false}), backend, {template: "x", random: () => 0});
 		await room.run();
+		assert.strictEqual(backend.calls.filter(c => c.name === "Leak checker").length, responses.length);
 		assert(!room.participants[0].present);
 		assert.strictEqual(room.awaiting_host, null);
-		assert.strictEqual(room.envelopes.list.length, 0);
 		assert.strictEqual(backend.calls.filter(c => c.name === "Opus").length, 2);
 		let others = backend.calls.filter(c => ["Sonnet", "Haiku"].includes(c.name));
 		assert(others.length > 0, "room carries on");
 		let visible = JSON.stringify(others);
 		assert(!visible.includes("LEAKED_"));
+		assert(visible.includes("Opus created and sealed envelope #1"), "the tool's announcement stands");
+		assert(visible.includes("KEPT_CONTENT"), "the removed model's sealed envelope is opened, as after a refusal");
 		assert(visible.includes("Opus's reply was rejected due to an error, so Opus has been removed from the room for the rest of the session. The room carries on."));
 		assert.strictEqual(turns(room)[0].action, "rejected");
 		assert.strictEqual(turns(room)[0].text, "");
 		assert(turns(room)[0].withheld.includes("LEAKED_REPLY"));
+		assert(turns(room)[0].leak_error);
+		assert.strictEqual(room.log.filter(e => e.kind === "warning" && e.text.includes("being tried again")).length, responses.length - 1);
 	}
 });
 
-test("leak check: passes, sitting out, host handoffs and leaving include their public notices", async () => {
-	for (let response of [pass(), file_step(tool("sit_out", {})), call_host("hello"), leave("bye", "private goodbye")]) {
-		let submitted;
-		let backend = fake_backend((name, req) => {
-			if (name !== "Leak checker") return response;
-			submitted = last_user_text(req);
-			return speak('{"leaked_thinking": false}');
+test("leak check: a failed check is tried once more, and a fenced answer is accepted", async () => {
+	let cases = [
+		[new Error("overloaded"), verdict(false)],
+		[speak("no idea"), verdict(false)],
+		[Object.assign(verdict(false), {stop_reason: "max_tokens"}), verdict(false)],
+		[speak("```json\n{\"leaked_thinking\": false}\n```")],
+		[speak("```\n{\"leaked_thinking\": false}\n```")],
+	];
+	for (let responses of cases) {
+		let backend = fake_backend((name, req, n) => {
+			if (name !== "Leak checker") return speak("hello");
+			let r = responses[n];
+			if (r instanceof Error) throw r;
+			return r;
+		});
+		let room = new_room(checked_cfg(), backend, {template: "x"});
+		room.open();
+		await room.take_turn(room.participants[0]);
+		assert.strictEqual(backend.calls.filter(c => c.name === "Leak checker").length, responses.length);
+		assert(room.participants[0].present);
+		assert.strictEqual(turns(room)[0].text, "hello");
+	}
+	let fenced = speak("```json\n{\"leaked_thinking\": true}\n```");
+	let backend = fake_backend((name) => name === "Leak checker" ? fenced : speak("hello"));
+	let room = new_room(checked_cfg(), backend, {template: "x"});
+	room.open();
+	await room.take_turn(room.participants[0]);
+	assert(!room.participants[0].present, "a fenced yes is still a yes");
+});
+
+test("leak check: turns without text need no check, and their actions work as usual", async () => {
+	for (let response of [pass(), file_step(tool("sit_out", {})), call_host(""), leave("", "private goodbye")]) {
+		let backend = fake_backend((name) => {
+			assert.notStrictEqual(name, "Leak checker");
+			return response;
 		});
 		let room = new_room(checked_cfg({host_present: true}), backend, {template: "x"});
 		room.open();
-		room.envelopes.create("Opus", "prior secret", "42", true);
-		let start = room.log.length;
 		await room.take_turn(room.participants[0]);
-		let actual = room.log.slice(start).map(e => room.render_for(e, room.participants[1])).filter(Boolean).join("\n\n");
-		assert.strictEqual(submitted, actual);
-		assert(!submitted.includes("private goodbye"));
+		let t = turns(room)[0];
+		assert(["pass", "sit_out", "silent", "leave"].includes(t.action), t.action);
+		let name = response.content[response.content.length - 1].name;
+		assert.strictEqual(room.participants[0].sitting_out, name === "sit_out");
+		assert.strictEqual(room.awaiting_host, name === "call_host" ? "Opus" : null);
+		assert.strictEqual(room.participants[0].present, name !== "leave_room");
 	}
 });
 
-test("leak check: partial turns are checked after a generation error; quit during checking cannot publish", async () => {
+test("leak check: partial turns are checked after a generation error; quit during checking withholds the text", async () => {
 	for (let quit of [false, true]) {
 		let room;
 		let backend = fake_backend((name, req, n) => {
 			if (name === "Leak checker") {
-				assert(last_user_text(req).includes("partial reply"));
+				assert.strictEqual(last_user_text(req), "partial reply\n\n[Opus used a tool]");
 				if (quit) room.host_quit();
-				return speak('{"leaked_thinking": false}');
+				return verdict(false);
 			}
-			if (n === 0) return file_step(tool("roll_dice", {}), {type: "text", text: "partial reply"});
+			if (n === 0) return file_step({type: "text", text: "partial reply"}, tool("roll_dice", {}));
 			throw new Error("generation failed");
 		});
 		room = new_room(checked_cfg(), backend, {template: "x"});
 		room.open();
 		await room.take_turn(room.participants[0]);
 		assert.strictEqual(turns(room).length, 1);
-		assert.strictEqual(turns(room)[0].action, quit ? "rejected" : "speak");
+		assert.strictEqual(turns(room)[0].action, quit ? "interrupted" : "speak");
 		assert.strictEqual(room.closed, quit);
 		assert.strictEqual(JSON.stringify(room.build_view(room.participants[1])).includes("partial reply"), !quit);
+		if (quit) {
+			assert.strictEqual(turns(room)[0].withheld, "partial reply");
+			assert(!room.log.some(e => e.kind === "leak_check"), "a verdict that arrives after /quit isn't acted on");
+		}
 	}
 });
 
@@ -3119,18 +3157,13 @@ test("leak check: no checker calls for disabled models, and each checked turn st
 	assert.strictEqual(turns(room).length, 6);
 });
 
-test("leak check: library text and image labels are checked, and rejected attachments never appear", async () => {
+test("leak check: drawings and library items are posted even when the text is rejected, and aren't checked", async () => {
 	let library_dir = await make_library(["story.txt: A short story.", "picture.png: A picture."], {"story.txt": "PUBLIC_LIBRARY_TEXT", "picture.png": "IMAGE"});
 	for (let reject of [false, true]) {
-		let submitted;
 		let backend = fake_backend((name, req, n) => {
 			if (name === "Leak checker") {
-				submitted = last_user_text(req);
-				assert(submitted.includes("PUBLIC_LIBRARY_TEXT"));
-				assert(submitted.includes("from the library, opened by Opus: picture.png, A picture."));
-				assert(submitted.includes("rendered by Opus from drawing.svg in Opus's private folder"));
-				assert(!submitted.includes("base64"));
-				return speak(JSON.stringify({leaked_thinking: reject}));
+				assert.strictEqual(last_user_text(req), "[Opus used a tool]\n\nLook at these.");
+				return verdict(reject);
 			}
 			if (n === 0) return file_step(tool("open_library_item", {filename: "story.txt"}), tool("open_library_item", {filename: "picture.png"}), tool("render_svg", {filename: "drawing.svg"}));
 			return speak("Look at these.");
@@ -3138,29 +3171,24 @@ test("leak check: library text and image labels are checked, and rejected attach
 		let room = new_room(checked_cfg({library_dir, storage_dir: temp_dir()}), backend, {template: "x"});
 		room.participants[0].storage.write("drawing.svg", '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><rect width="20" height="20" fill="red"/></svg>', "test");
 		room.open();
-		let start = room.log.length;
 		await room.take_turn(room.participants[0]);
-		if (reject) {
-			assert(!room.log.some(e => ["render", "library"].includes(e.kind)));
-			assert.strictEqual(room.library_opened.size, 0);
-			assert(!JSON.stringify(room.build_view(room.participants[1])).includes("PUBLIC_LIBRARY_TEXT"));
-		} else {
-			let public_text = room.log.slice(start).flatMap(e => {
-				let rendered = room.render_for(e, room.participants[1]);
-				return Array.isArray(rendered) ? rendered.filter(b => b.type === "text").map(b => b.text) : (rendered ? [rendered] : []);
-			}).join("\n\n");
-			assert.strictEqual(submitted, public_text);
-		}
+		assert.strictEqual(room.participants[0].present, !reject);
+		assert(room.log.some(e => e.kind === "render"));
+		assert(room.log.some(e => e.kind === "library"));
+		assert.strictEqual(room.library_opened.size, 2);
+		let view = JSON.stringify(room.build_view(room.participants[1]));
+		assert(view.includes("PUBLIC_LIBRARY_TEXT"));
+		assert.strictEqual(view.includes("Look at these."), !reject);
 	}
 });
 
-test("leak check: quit mid-generation and original API refusals cannot expose pending tools or envelopes", async () => {
+test("leak check: API refusals and quitting mid-generation need no check, and nothing unchecked is shown", async () => {
 	for (let quit of [false, true]) {
 		let room;
 		let backend = fake_backend((name, req, n) => {
 			assert.notStrictEqual(name, "Leak checker");
 			assert.strictEqual(req.on_text, undefined, "unchecked text isn't streamed");
-			if (n === 0) return file_step(tool("create_envelope", {label: "UNCHECKED_LABEL", content: "UNCHECKED_CONTENT", sealed: true}));
+			if (n === 0) return file_step({type: "text", text: "UNCHECKED_FIRST"}, tool("create_envelope", {label: "label", content: "content", sealed: true}));
 			if (quit) room.host_quit();
 			return Object.assign(speak("UNCHECKED_REPLY"), {stop_reason: "refusal"});
 		});
@@ -3168,10 +3196,10 @@ test("leak check: quit mid-generation and original API refusals cannot expose pe
 		room.open();
 		await room.take_turn(room.participants[0]);
 		assert.strictEqual(turns(room).length, 1);
-		assert.strictEqual(turns(room)[0].action, "rejected");
-		assert(!room.participants[0].present);
-		assert.strictEqual(room.envelopes.list.length, 0);
+		assert.strictEqual(turns(room)[0].action, quit ? "interrupted" : "refused");
+		assert(!room.participants[0].present || quit);
 		assert(!JSON.stringify(room.build_view(room.participants[1])).includes("UNCHECKED_"));
+		assert(JSON.stringify(turns(room)[0]).includes("UNCHECKED_FIRST"), "kept for the host");
 	}
 });
 

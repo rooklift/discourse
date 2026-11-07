@@ -93,6 +93,7 @@ const MAX_TOOL_STEPS = 10;					// API calls per turn, when a model uses its file
 const MAX_IMAGES = 20;						// Images the host can share per session; every request resends them all.
 const MAX_RENDERS = 10;						// Drawings the models can render per session, between them; likewise resent.
 const MAX_LIBRARY_OPENS = 10;				// Library items the models can open per session, between them; likewise resent.
+const LEAK_CHECK_ATTEMPTS = 2;				// Tries at checking a turn's text, before the turn is rejected.
 
 // ------------------------------------------------------------------------------------------------
 
@@ -212,11 +213,6 @@ const room_prototype = {
 	},
 
 	append: function(entry) {
-		let turn = this.turn_in_progress;
-		if (turn?.pending_entries && entry.kind === "tool_op") {
-			turn.pending_entries.push(entry);
-			return entry;
-		}
 		entry.seq = this.log.length;
 		entry.time = new Date().toISOString();
 		this.log.push(entry);
@@ -624,10 +620,6 @@ const room_prototype = {
 
 		let steps = [];
 		let turn = {p, steps};
-		if (p.cfg.leak_test) {
-			turn.pending_entries = [];
-			turn.envelopes_before = this.envelopes.list.map(e => Object.assign({}, e));
-		}
 		this.turn_in_progress = turn;
 		let conversation = messages.slice();
 		let failure = null;
@@ -698,18 +690,7 @@ const room_prototype = {
 
 		if (steps.length > 0) {
 			this.consecutive_errors = 0;
-			if (p.cfg.leak_test) {
-				let refusal = steps.map(s => s.refusal).find(Boolean);
-				if (refusal) {
-					this.turn_in_progress = null;
-					this.reject_turn(turn, refusal);
-				} else {
-					await this.check_turn(turn);
-				}
-			} else {
-				this.turn_in_progress = null;
-				this.record_turn(p, steps);
-			}
+			await this.finish_turn(turn);
 		}
 		this.in_flight = null;
 		this.abort_controller = null;
@@ -725,82 +706,105 @@ const room_prototype = {
 		this.emit_state();
 	},
 
-	// Render the same planned entries that will be committed after approval. Every other
-	// participant gets the same text; private reasoning, tool results and host notes stay out.
-	check_turn: async function(turn) {
+	// Records a finished turn. For a model with leak_test, its text is checked first, and only
+	// published if the checker approves. Tools have already run and announced themselves, as
+	// for any model: the check covers the text alone.
+
+	finish_turn: async function(turn) {
 		let {p, steps} = turn;
 		let plan = this.prepare_turn(p, steps);
-		let entries = turn.pending_entries.concat(plan.entries);
-		let text = entries.flatMap(entry => {
-			let rendered = this.render_for(entry, {name: null});
-			return Array.isArray(rendered) ? rendered.filter(b => b.type === "text").map(b => b.text) : (rendered ? [rendered] : []);
-		}).join("\n\n");
 		let error = "";
-		try {
-			if (!this.leak_checker) {
-				throw new Error("no leak_checker is configured");
-			}
-			let response = await this.backend.send({
-				participant: this.leak_checker.cfg,
-				system: leak_check.SYSTEM,
-				messages: [{role: "user", content: [{type: "text", text}]}],
-				tools: [], show_thinking: false, cache_ttl: this.cfg.cache_ttl,
-				signal: this.abort_controller.signal,
-			});
-			if (this.closed || this.turn_in_progress !== turn) {
+		if (p.cfg.leak_test && plan.text && !plan.refusal) {
+			error = await this.check_text(turn);
+			if (error === null) {					// The room closed meanwhile: host_quit() has recorded the turn.
 				return;
 			}
-			let cost = this.account(this.leak_checker, response.usage || {});
-			this.append({kind: "leak_check", author: p.name, usage: response.usage || {}, cost});
-			if (leak_check.parse_verdict(response)) {
-				error = "the leak checker detected leaked hidden thinking";
-			}
-		} catch (e) {
-			error = String(e?.message || e);
-		}
-		if (this.closed || this.turn_in_progress !== turn) {
-			return;
 		}
 		this.turn_in_progress = null;
 		if (error) {
-			this.reject_turn(turn, error);
+			this.reject_turn(p, steps, plan, error);
 		} else {
-			for (let entry of turn.pending_entries) {
-				this.append(entry);
-			}
 			this.record_turn(p, steps, plan);
 		}
 	},
 
-	finish_interrupted_turn: function(turn) {
-		if (turn.p.cfg.leak_test) {
-			this.reject_turn(turn, "the turn was interrupted before leak checking completed");
-		} else {
-			this.record_turn(turn.p, turn.steps);
+	// The text the leak checker sees: each step's text, in order, with a marker wherever the
+	// model called tools.
+
+	text_to_check: function(p, steps) {
+		let parts = [];
+		for (let s of steps) {
+			if (s.text.trim()) {
+				parts.push(s.text.trim());
+			}
+			if (s.tool_results.length > 0) {
+				parts.push(`[${p.name} used a tool]`);
+			}
 		}
+		return parts.join("\n\n");
 	},
 
-	reject_turn: function(turn, reason) {
+	// Asks the leak checker about the turn's text, trying once more if the check itself fails.
+	// Resolves to "" if approved, the reason if not, or null if the turn was taken over meanwhile.
+
+	check_text: async function(turn) {
 		let {p, steps} = turn;
-		let entry = this.prepare_turn(p, steps).entries[0];
-		entry.action = "rejected";
-		entry.withheld = entry.text || entry.withheld;
-		entry.text = "";
-		entry.leak_error = reason;
+		let text = this.text_to_check(p, steps);
+		let error = "";
+		for (let attempt = 1; attempt <= LEAK_CHECK_ATTEMPTS; attempt++) {
+			try {
+				let response = await this.backend.send({
+					participant: this.leak_checker.cfg,
+					system: leak_check.SYSTEM,
+					messages: [{role: "user", content: [{type: "text", text}]}],
+					tools: [], show_thinking: false, cache_ttl: this.cfg.cache_ttl,
+					signal: this.abort_controller.signal,
+				});
+				if (this.closed || this.turn_in_progress !== turn) {
+					return null;
+				}
+				let cost = this.account(this.leak_checker, response.usage || {});
+				this.append({kind: "leak_check", author: p.name, usage: response.usage || {}, cost});
+				return leak_check.parse_verdict(response) ? "the leak checker detected leaked hidden thinking" : "";
+			} catch (e) {
+				if (this.closed || this.turn_in_progress !== turn) {
+					return null;
+				}
+				error = String(e?.message || e);
+				if (attempt < LEAK_CHECK_ATTEMPTS) {
+					this.warn(`The leak check of ${p.name}'s turn failed (${error}), so it's being tried again.`);
+				}
+			}
+		}
+		return error;
+	},
+
+	// A checked model's turn that was cut short by /quit: its text was never checked, so it's
+	// kept for the host only.
+
+	finish_interrupted_turn: function(turn) {
+		let {p, steps} = turn;
+		let plan = this.prepare_turn(p, steps);
+		if (p.cfg.leak_test && plan.text && !plan.refusal) {
+			withhold_text(plan, "interrupted");
+		}
+		this.record_turn(p, steps, plan);
+	},
+
+	// The leak checker didn't approve the turn's text: it's kept for the host only, and the model
+	// is removed, as after a refusal. What its tools did stands, and drawings and library items
+	// it opened are posted as usual.
+
+	reject_turn: function(p, steps, plan, reason) {
+		withhold_text(plan, "rejected");
+		plan.entries[0].leak_error = reason;
 		p.turns++;
 		this.turn_count++;
 		this.note_floor(p);
-		// Keep the host's audit trail, but no announcement from this turn is published.
-		for (let pending of turn.pending_entries || []) {
-			this.append(Object.assign({}, pending, {announce: "", withheld_announce: pending.announce || ""}));
+		for (let entry of plan.entries.slice(0, plan.after_turn)) {
+			this.append(entry);
 		}
-		this.append(entry);
-		for (let it of steps.flatMap(s => s.library || [])) {
-			this.library_opened.delete(it.name.toLowerCase());
-		}
-		// Rejected envelopes must not become visible through a later peek or automatic opening.
-		this.envelopes.list = turn.envelopes_before;
-		this.remove(p, "removed", false);
+		this.remove(p, "removed");
 		this.notice(`${p.name}'s reply was rejected due to an error, so ${p.name} has been removed from the room for the rest of the session. The room carries on.`);
 		this.warn(`${p.name}: ${reason}. The rejected reply is kept in the JSONL transcript only.`);
 	},
@@ -1532,6 +1536,16 @@ function clean_block(b) {
 		cleaned.native = b.native;
 	}
 	return cleaned;
+}
+
+// Keeps a turn's text out of the room: the host still has it, in the JSONL transcript.
+
+function withhold_text(plan, action) {
+	let entry = plan.entries[0];
+	entry.action = action;
+	entry.withheld = entry.text;
+	entry.text = "";
+	plan.text = "";
 }
 
 function response_text(response) {
