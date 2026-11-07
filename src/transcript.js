@@ -74,6 +74,9 @@ function attach_transcript(room, cfg) {
 			return `- ${p.name}: ${p.turns} turns, $${p.cost.toFixed(2)} (input ${u.input}, cache read ${u.cache_read}, cache write ${u.cache_write}, output ${u.output})`;
 		});
 		let total = `$${room.total_cost.toFixed(2)}${room.cost_known ? "" : " (incomplete: some prices unknown)"}`;
+		if (room.leak_checker) {
+			lines.push(`- Leak checker: $${room.leak_checker.cost.toFixed(2)}`);
+		}
 		let groups = room.cost_by_provider();
 		let split = room.cost_split();
 		let notes = room.notes_for_host();
@@ -82,7 +85,8 @@ function attach_transcript(room, cfg) {
 			: "";
 		write_md(`---\n\n${notes_md}Total cost: ${total}${split}\n\n${lines.join("\n")}\n`);
 		write_json({kind: "summary", total_cost: room.total_cost, cost_known: room.cost_known, providers: groups,
-			participants: room.participants.map(p => ({name: p.name, turns: p.turns, cost: p.cost, usage: p.usage}))});
+			participants: room.participants.map(p => ({name: p.name, turns: p.turns, cost: p.cost, usage: p.usage})),
+			leak_checker: room.leak_checker ? {cost: room.leak_checker.cost, usage: room.leak_checker.usage} : null});
 	});
 
 	return {jsonl_path, md_path};

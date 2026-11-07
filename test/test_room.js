@@ -92,6 +92,12 @@ function validate_request(req) {
 		}
 	}
 	assert.strictEqual(typeof req.system, "string");
+	if (req.participant.name === "Leak checker") {
+		assert.deepStrictEqual(req.tools, []);
+		assert.strictEqual(m.length, 1, "each leak check is a fresh one-shot request");
+		assert.strictEqual(req.show_thinking, false);
+		return;
+	}
 	let names = req.tools.map(t => t.name).filter(n => n !== "call_host");	// Only offered when the host is present.
 	let library = names.filter(n => n === "list_library" || n === "open_library_item");
 	assert(library.length === 0 || (library.length === 2 && names.slice(-2).join() === "list_library,open_library_item"), "both library tools, last, or neither");
@@ -2985,6 +2991,216 @@ test("library_dir: the default is off if missing; one named in the config is war
 });
 
 // ------------------------------------------------------------------------------------------------
+
+function checked_cfg(overrides = {}) {
+	let cfg = make_cfg(overrides);
+	cfg.participants[0].leak_test = true;
+	cfg.leak_checker = Object.assign({}, cfg.participants[2], {name: "Leak checker"});
+	return cfg;
+}
+
+test("leak check: exact public turn text, no history or private blocks, and no publication before approval", async () => {
+	let checked = [];
+	let room;
+	let backend = fake_backend((name, req, n) => {
+		if (name === "Leak checker") {
+			let text = last_user_text(req);
+			checked.push(text);
+			assert(!JSON.stringify(req).includes("PRIVATE_THOUGHT"));
+			assert(!text.includes("PRIVATE_NOTE"));
+			assert(!text.includes("OLD_HISTORY"));
+			assert(!room.log.some(e => e.author === "Opus" && ["turn", "tool_op"].includes(e.kind)), "nothing public has been appended yet");
+			assert(!JSON.stringify(room.build_view(room.participants[1])).includes("public reply"));
+			return speak('{"leaked_thinking": false}');
+		}
+		if (n === 0) return file_step(tool("shuffle", {items: ["red", "blue"]}), tool("note_to_host", {note: "PRIVATE_NOTE"}));
+		return speak("  public reply  ", [{type: "thinking", thinking: "PRIVATE_THOUGHT", signature: "private"}]);
+	});
+	room = new_room(checked_cfg(), backend, {template: "x", random: () => 0});
+	room.open();
+	room.host_say("OLD_HISTORY");
+	room.apply_pending_host_messages();
+	let start = room.log.length;
+	await room.take_turn(room.participants[0]);
+	let expected = room.log.slice(start).map(e => room.render_for(e, room.participants[1])).filter(Boolean).join("\n\n");
+	assert.deepStrictEqual(checked, [expected]);
+	assert(expected.includes("Opus shuffled"));
+	assert(expected.endsWith('<message from="Opus">\npublic reply\n</message>'));
+	assert(room.participants[0].present);
+	assert(room.leak_checker.cost > 0);
+	assert.strictEqual(room.total_cost, room.participants[0].cost + room.leak_checker.cost);
+	assert.strictEqual(room.cost_by_provider()[0].cost, room.total_cost);
+});
+
+test("leak check: yes, invalid output and API errors reject the whole turn and the room continues", async () => {
+	let responses = [
+		speak('{"leaked_thinking": true}'), speak("no"), speak("```json\n{\"leaked_thinking\": false}\n```"),
+		speak('{"leaked_thinking": "false"}'), speak('{"leaked_thinking": false, "reason": "safe"}'),
+		speak("null"), speak("[]"), speak(""),
+		Object.assign(speak('{"leaked_thinking": false}'), {stop_reason: "max_tokens"}),
+		Object.assign(speak('{"leaked_thinking": false}'), {stop_reason: "refusal"}),
+		new Error("checker unavailable"),
+	];
+	for (let response of responses) {
+		let room;
+		let backend = fake_backend((name, req, n) => {
+			if (name === "Leak checker") {
+				assert(last_user_text(req).includes("LEAKED_LABEL"));
+				if (response instanceof Error) throw response;
+				return response;
+			}
+			if (name === "Opus" && n === 0) return file_step(tool("create_envelope", {label: "LEAKED_LABEL", content: "LEAKED_SECRET", sealed: true}));
+			if (name === "Opus") return call_host("LEAKED_REPLY @Sonnet");
+			return speak("still here");
+		});
+		room = new_room(checked_cfg({host_present: true, max_turns: 3, farewell_round: false}), backend, {template: "x", random: () => 0});
+		await room.run();
+		assert(!room.participants[0].present);
+		assert.strictEqual(room.awaiting_host, null);
+		assert.strictEqual(room.envelopes.list.length, 0);
+		assert.strictEqual(backend.calls.filter(c => c.name === "Opus").length, 2);
+		let others = backend.calls.filter(c => ["Sonnet", "Haiku"].includes(c.name));
+		assert(others.length > 0, "room carries on");
+		let visible = JSON.stringify(others);
+		assert(!visible.includes("LEAKED_"));
+		assert(visible.includes("Opus's reply was rejected due to an error, so Opus has been removed from the room for the rest of the session. The room carries on."));
+		assert.strictEqual(turns(room)[0].action, "rejected");
+		assert.strictEqual(turns(room)[0].text, "");
+		assert(turns(room)[0].withheld.includes("LEAKED_REPLY"));
+	}
+});
+
+test("leak check: passes, sitting out, host handoffs and leaving include their public notices", async () => {
+	for (let response of [pass(), file_step(tool("sit_out", {})), call_host("hello"), leave("bye", "private goodbye")]) {
+		let submitted;
+		let backend = fake_backend((name, req) => {
+			if (name !== "Leak checker") return response;
+			submitted = last_user_text(req);
+			return speak('{"leaked_thinking": false}');
+		});
+		let room = new_room(checked_cfg({host_present: true}), backend, {template: "x"});
+		room.open();
+		room.envelopes.create("Opus", "prior secret", "42", true);
+		let start = room.log.length;
+		await room.take_turn(room.participants[0]);
+		let actual = room.log.slice(start).map(e => room.render_for(e, room.participants[1])).filter(Boolean).join("\n\n");
+		assert.strictEqual(submitted, actual);
+		assert(!submitted.includes("private goodbye"));
+	}
+});
+
+test("leak check: partial turns are checked after a generation error; quit during checking cannot publish", async () => {
+	for (let quit of [false, true]) {
+		let room;
+		let backend = fake_backend((name, req, n) => {
+			if (name === "Leak checker") {
+				assert(last_user_text(req).includes("partial reply"));
+				if (quit) room.host_quit();
+				return speak('{"leaked_thinking": false}');
+			}
+			if (n === 0) return file_step(tool("roll_dice", {}), {type: "text", text: "partial reply"});
+			throw new Error("generation failed");
+		});
+		room = new_room(checked_cfg(), backend, {template: "x"});
+		room.open();
+		await room.take_turn(room.participants[0]);
+		assert.strictEqual(turns(room).length, 1);
+		assert.strictEqual(turns(room)[0].action, quit ? "rejected" : "speak");
+		assert.strictEqual(room.closed, quit);
+		assert.strictEqual(JSON.stringify(room.build_view(room.participants[1])).includes("partial reply"), !quit);
+	}
+});
+
+test("leak check: no checker calls for disabled models, and each checked turn starts afresh", async () => {
+	let backend = fake_backend((name, req) => name === "Leak checker" ? speak('{"leaked_thinking": false}') : speak("hello"));
+	let room = new_room(checked_cfg({max_turns: 6, farewell_round: false}), backend, {template: "x", random: () => 0});
+	await room.run();
+	assert.strictEqual(backend.calls.filter(c => c.name === "Leak checker").length, 2);
+	assert.strictEqual(turns(room).length, 6);
+});
+
+test("leak check: library text and image labels are checked, and rejected attachments never appear", async () => {
+	let library_dir = await make_library(["story.txt: A short story.", "picture.png: A picture."], {"story.txt": "PUBLIC_LIBRARY_TEXT", "picture.png": "IMAGE"});
+	for (let reject of [false, true]) {
+		let submitted;
+		let backend = fake_backend((name, req, n) => {
+			if (name === "Leak checker") {
+				submitted = last_user_text(req);
+				assert(submitted.includes("PUBLIC_LIBRARY_TEXT"));
+				assert(submitted.includes("from the library, opened by Opus: picture.png, A picture."));
+				assert(submitted.includes("rendered by Opus from drawing.svg in Opus's private folder"));
+				assert(!submitted.includes("base64"));
+				return speak(JSON.stringify({leaked_thinking: reject}));
+			}
+			if (n === 0) return file_step(tool("open_library_item", {filename: "story.txt"}), tool("open_library_item", {filename: "picture.png"}), tool("render_svg", {filename: "drawing.svg"}));
+			return speak("Look at these.");
+		});
+		let room = new_room(checked_cfg({library_dir, storage_dir: temp_dir()}), backend, {template: "x"});
+		room.participants[0].storage.write("drawing.svg", '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><rect width="20" height="20" fill="red"/></svg>', "test");
+		room.open();
+		let start = room.log.length;
+		await room.take_turn(room.participants[0]);
+		if (reject) {
+			assert(!room.log.some(e => ["render", "library"].includes(e.kind)));
+			assert.strictEqual(room.library_opened.size, 0);
+			assert(!JSON.stringify(room.build_view(room.participants[1])).includes("PUBLIC_LIBRARY_TEXT"));
+		} else {
+			let public_text = room.log.slice(start).flatMap(e => {
+				let rendered = room.render_for(e, room.participants[1]);
+				return Array.isArray(rendered) ? rendered.filter(b => b.type === "text").map(b => b.text) : (rendered ? [rendered] : []);
+			}).join("\n\n");
+			assert.strictEqual(submitted, public_text);
+		}
+	}
+});
+
+test("leak check: quit mid-generation and original API refusals cannot expose pending tools or envelopes", async () => {
+	for (let quit of [false, true]) {
+		let room;
+		let backend = fake_backend((name, req, n) => {
+			assert.notStrictEqual(name, "Leak checker");
+			assert.strictEqual(req.on_text, undefined, "unchecked text isn't streamed");
+			if (n === 0) return file_step(tool("create_envelope", {label: "UNCHECKED_LABEL", content: "UNCHECKED_CONTENT", sealed: true}));
+			if (quit) room.host_quit();
+			return Object.assign(speak("UNCHECKED_REPLY"), {stop_reason: "refusal"});
+		});
+		room = new_room(checked_cfg(), backend, {template: "x"});
+		room.open();
+		await room.take_turn(room.participants[0]);
+		assert.strictEqual(turns(room).length, 1);
+		assert.strictEqual(turns(room)[0].action, "rejected");
+		assert(!room.participants[0].present);
+		assert.strictEqual(room.envelopes.list.length, 0);
+		assert(!JSON.stringify(room.build_view(room.participants[1])).includes("UNCHECKED_"));
+	}
+});
+
+test("config: leak checker is separate, validated, priced and loads its provider's key only when used", () => {
+	let {load_config, read_api_keys} = require("../src/config");
+	let dir = temp_dir();
+	let file = path.join(dir, "config.json");
+	fs.writeFileSync(path.join(dir, "a.txt"), "anthropic-key");
+	fs.writeFileSync(path.join(dir, "o.txt"), "openai-key");
+	let base = {storage_dir: "", budget: 0, anthropic_api_key_file: "a.txt", models: {A: {model: "claude-opus-5-5", leak_test: true}, B: {model: "claude-sonnet-5-5"}}};
+	let load = extra => {
+		fs.writeFileSync(file, JSON.stringify(Object.assign({}, base, extra)));
+		return load_config(file);
+	};
+	assert.throws(() => load({}), /needs a separate leak_checker/);
+	assert.throws(() => load({leak_checker: {model: "gpt-6.1-sol"}}), /leak_checker needs "openai_api_key_file"/);
+	for (let checker of [false, [], {}, {model: "x", provider: "bad"}, {model: "x", effort: "bad"}, {model: "x", leak_test: true}]) {
+		assert.throws(() => load({leak_checker: checker}));
+	}
+	assert.throws(() => load({models: {A: {model: "x", leak_test: "true"}, B: {model: "y"}}}), /leak_test must be true or false/);
+	assert.throws(() => load({budget: 2, leak_checker: {model: "unknown-checker"}}), /No known prices for leak_checker/);
+	let cfg = load({openai_api_key_file: "o.txt", leak_checker: {model: "gpt-6.1-sol", effort: "low"}});
+	assert.deepStrictEqual(cfg.participants.map(p => p.name), ["A", "B"]);
+	assert.strictEqual(cfg.leak_checker.provider, "openai");
+	assert(cfg.leak_checker.price_tiers);
+	assert.deepStrictEqual(read_api_keys(cfg), {anthropic: "anthropic-key", openai: "openai-key"});
+	cfg = load({models: {A: {model: "x"}, B: {model: "y"}}, leak_checker: {model: "gpt-6.1-sol"}});
+	assert.deepStrictEqual(read_api_keys(cfg), {anthropic: "anthropic-key"});
+});
 
 (async () => {
 	let failed = 0;

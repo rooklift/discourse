@@ -6,6 +6,7 @@ const path = require("path");
 const pricing = require("./pricing");
 
 const DEFAULTS = {
+	leak_checker: null,				// Separate model settings for one-shot checks of public turn text.
 	anthropic_api_key_file: "",		// Path to a file containing only your Anthropic API key. Keep it outside the repo.
 	google_api_key_file: "",		// The same for a Gemini API key, if any participant is a Gemini model.
 	openai_api_key_file: "",		// The same for an OpenAI API key, if any participant is an OpenAI model.
@@ -33,6 +34,7 @@ const DEFAULTS = {
 // Each entry in "models". Its key is the name used in the room, and for @mentions.
 
 const MODEL_DEFAULTS = {
+	leak_test: false,				// Check the turn for leaked hidden thinking before sharing it.
 	model: "",						// Required. API model ID, e.g. "claude-opus-5-5", "gemini-3.8-flash" or "gpt-6.1-sol".
 	provider: "",					// "anthropic", "google" or "openai". Worked out from the model ID if blank.
 	full_name: "",					// Shown to the other models, e.g. "Claude Opus 5.5". Defaults to the model ID.
@@ -82,6 +84,31 @@ function check_keys(obj, allowed, where) {
 			throw new Error(`Unknown key "${key}" in ${where}`);
 		}
 	}
+}
+
+function model_settings(settings, where, defaults = MODEL_DEFAULTS) {
+	if (!settings || typeof settings !== "object" || Array.isArray(settings)) {
+		throw new Error(`${where} should be an object of settings`);
+	}
+	check_keys(settings, defaults, where);
+	let o = Object.assign({}, defaults, settings);
+	if (typeof o.model !== "string" || !o.model) {
+		throw new Error(`${where} needs a "model" (the API model ID)`);
+	}
+	o.provider = o.provider || provider_for(o.model);
+	let provider = Object.hasOwn(PROVIDERS, o.provider) ? PROVIDERS[o.provider] : null;
+	if (!provider) {
+		throw new Error(`${where}: provider must be one of ${Object.keys(PROVIDERS).map(k => JSON.stringify(k)).join(", ")}`);
+	}
+	if (!provider.efforts.includes(o.effort)) {
+		throw new Error(`${where}: effort must be one of ${provider.efforts.map(e => JSON.stringify(e)).join(", ")}`);
+	}
+	if (Object.hasOwn(o, "leak_test") && typeof o.leak_test !== "boolean") {
+		throw new Error(`${where}: leak_test must be true or false`);
+	}
+	o.company = o.company || provider.company;
+	o.full_name = o.full_name || o.model;
+	return o;
 }
 
 // opts.active: names to seat this session, overriding the config's "active" (the CLI's --active).
@@ -154,26 +181,16 @@ function load_config(config_path, opts = {}) {
 			throw new Error(`model name "${name}" is used twice (or clashes with host_name)`);
 		}
 		seen[lower] = name;
-		if (!settings || typeof settings !== "object" || Array.isArray(settings)) {
-			throw new Error(`models.${name} should be an object of settings`);
-		}
-		check_keys(settings, MODEL_DEFAULTS, `models.${name}`);
-		let o = Object.assign({name}, MODEL_DEFAULTS, settings);
-		if (!o.model) {
-			throw new Error(`models.${name} needs a "model" (the API model ID)`);
-		}
-		o.provider = o.provider || provider_for(o.model);
-		let provider = Object.hasOwn(PROVIDERS, o.provider) ? PROVIDERS[o.provider] : null;
-		if (!provider) {
-			throw new Error(`${name}: provider must be one of ${Object.keys(PROVIDERS).map(k => JSON.stringify(k)).join(", ")}`);
-		}
-		if (!provider.efforts.includes(o.effort)) {
-			throw new Error(`${name}: effort must be one of ${provider.efforts.map(e => JSON.stringify(e)).join(", ")}`);
-		}
-		o.company = o.company || provider.company;
-		o.full_name = o.full_name || o.model;
-		return o;
+		return Object.assign({name}, model_settings(settings, `models.${name}`));
 	});
+
+	if (cfg.leak_checker !== null) {
+		let defaults = {model: "", provider: "", max_tokens: 16000, effort: "", prices: null};
+		cfg.leak_checker = Object.assign({name: "Leak checker"}, model_settings(cfg.leak_checker, "leak_checker", defaults));
+	}
+	if (all.some(p => p.leak_test) && !cfg.leak_checker) {
+		throw new Error("leak_test: true needs a separate leak_checker config with a model");
+	}
 
 	let active = opts.active ?? cfg.active;
 	if (!Array.isArray(active) || active.some(n => typeof n !== "string")) {
@@ -228,6 +245,18 @@ function load_config(config_path, opts = {}) {
 		return o;
 	});
 
+	if (cfg.participants.some(p => p.leak_test)) {
+		let checker = cfg.leak_checker;
+		let provider = PROVIDERS[checker.provider];
+		if (!cfg[provider.key_file]) {
+			throw new Error(`leak_checker needs "${provider.key_file}"`);
+		}
+		checker.price_tiers = pricing.tiers_for(checker.model, checker.prices);
+		if (!checker.price_tiers && cfg.budget > 0) {
+			throw new Error(`No known prices for leak_checker model ${checker.model}; add a "prices" object for it, or set budget to 0`);
+		}
+	}
+
 	if (cfg.first_speaker) {
 		let first = cfg.participants.find(p => p.name.toLowerCase() === String(cfg.first_speaker).toLowerCase());
 		if (!first) {
@@ -254,7 +283,8 @@ function read_key_file(file) {
 
 function read_api_keys(cfg) {
 	let keys = {};
-	for (let p of cfg.participants) {
+	let models = cfg.participants.concat(cfg.participants.some(p => p.leak_test) ? [cfg.leak_checker] : []);
+	for (let p of models) {
 		if (!keys[p.provider]) {
 			keys[p.provider] = read_key_file(cfg[PROVIDERS[p.provider].key_file]);
 		}

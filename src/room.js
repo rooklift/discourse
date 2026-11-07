@@ -13,6 +13,7 @@
 
 const EventEmitter = require("events");
 const pricing = require("./pricing");
+const leak_check = require("./leak_check");
 const {PROVIDERS} = require("./config");
 const {build_system_prompt, clock_time} = require("./prompt");
 const {new_storage, make_file_tools, FILE_TOOL_NAMES, run_file_tool, LIMITS} = require("./storage");
@@ -114,6 +115,10 @@ function new_room(cfg, backend, opts = {}) {
 	Object.assign(room, {
 		cfg: cfg,
 		backend: backend,
+		leak_checker: cfg.participants.some(p => p.leak_test) && cfg.leak_checker ? {
+			cfg: cfg.leak_checker, cost: 0, cost_known: true,
+			usage: {input: 0, cache_read: 0, cache_write: 0, output: 0},
+		} : null,
 		shared_storage: shared,
 		envelopes: new_envelopes(),				// Secrets the room keeps; this session only.
 		library: library_tools.length > 0 ? library : null,
@@ -207,6 +212,11 @@ const room_prototype = {
 	},
 
 	append: function(entry) {
+		let turn = this.turn_in_progress;
+		if (turn?.pending_entries && entry.kind === "tool_op") {
+			turn.pending_entries.push(entry);
+			return entry;
+		}
 		entry.seq = this.log.length;
 		entry.time = new Date().toISOString();
 		this.log.push(entry);
@@ -257,7 +267,7 @@ const room_prototype = {
 
 	cost_by_provider: function() {
 		let groups = [];
-		for (let p of this.participants) {
+		for (let p of this.participants.concat(this.leak_checker ? [this.leak_checker] : [])) {
 			let provider = p.cfg.provider || "anthropic";
 			let g = groups.find(g => g.provider === provider);
 			if (!g) {
@@ -614,6 +624,10 @@ const room_prototype = {
 
 		let steps = [];
 		let turn = {p, steps};
+		if (p.cfg.leak_test) {
+			turn.pending_entries = [];
+			turn.envelopes_before = this.envelopes.list.map(e => Object.assign({}, e));
+		}
 		this.turn_in_progress = turn;
 		let conversation = messages.slice();
 		let failure = null;
@@ -624,7 +638,7 @@ const room_prototype = {
 			if (this.turn_in_progress === turn) {	// Not already recorded by host_quit().
 				this.turn_in_progress = null;
 				if (steps.length > 0) {
-					this.record_turn(p, steps);
+					this.finish_interrupted_turn(turn);
 				}
 			}
 			this.emit_state();
@@ -643,7 +657,7 @@ const room_prototype = {
 					show_thinking: this.cfg.show_thinking,
 					cache_ttl: this.cfg.cache_ttl,
 					signal: this.abort_controller.signal,
-					on_text: (delta) => this.emit("text_delta", {name: p.name, delta}),
+					on_text: p.cfg.leak_test ? undefined : (delta) => this.emit("text_delta", {name: p.name, delta}),
 				});
 			} catch (error) {
 				if (this.closed || (this.backend.is_abort_error && this.backend.is_abort_error(error))) {
@@ -682,13 +696,26 @@ const room_prototype = {
 			conversation.push({role: "user", content: step.tool_results.map(tool_result_block)});
 		}
 
+		if (steps.length > 0) {
+			this.consecutive_errors = 0;
+			if (p.cfg.leak_test) {
+				let refusal = steps.map(s => s.refusal).find(Boolean);
+				if (refusal) {
+					this.turn_in_progress = null;
+					this.reject_turn(turn, refusal);
+				} else {
+					await this.check_turn(turn);
+				}
+			} else {
+				this.turn_in_progress = null;
+				this.record_turn(p, steps);
+			}
+		}
 		this.in_flight = null;
 		this.abort_controller = null;
 		this.turn_in_progress = null;
-
-		if (steps.length > 0) {
-			this.consecutive_errors = 0;
-			this.record_turn(p, steps);
+		if (this.closed) {
+			return;
 		}
 
 		if (failure) {
@@ -696,6 +723,86 @@ const room_prototype = {
 		}
 
 		this.emit_state();
+	},
+
+	// Render the same planned entries that will be committed after approval. Every other
+	// participant gets the same text; private reasoning, tool results and host notes stay out.
+	check_turn: async function(turn) {
+		let {p, steps} = turn;
+		let plan = this.prepare_turn(p, steps);
+		let entries = turn.pending_entries.concat(plan.entries);
+		let text = entries.flatMap(entry => {
+			let rendered = this.render_for(entry, {name: null});
+			return Array.isArray(rendered) ? rendered.filter(b => b.type === "text").map(b => b.text) : (rendered ? [rendered] : []);
+		}).join("\n\n");
+		let error = "";
+		try {
+			if (!this.leak_checker) {
+				throw new Error("no leak_checker is configured");
+			}
+			let response = await this.backend.send({
+				participant: this.leak_checker.cfg,
+				system: leak_check.SYSTEM,
+				messages: [{role: "user", content: [{type: "text", text}]}],
+				tools: [], show_thinking: false, cache_ttl: this.cfg.cache_ttl,
+				signal: this.abort_controller.signal,
+			});
+			if (this.closed || this.turn_in_progress !== turn) {
+				return;
+			}
+			let cost = this.account(this.leak_checker, response.usage || {});
+			this.append({kind: "leak_check", author: p.name, usage: response.usage || {}, cost});
+			if (leak_check.parse_verdict(response)) {
+				error = "the leak checker detected leaked hidden thinking";
+			}
+		} catch (e) {
+			error = String(e?.message || e);
+		}
+		if (this.closed || this.turn_in_progress !== turn) {
+			return;
+		}
+		this.turn_in_progress = null;
+		if (error) {
+			this.reject_turn(turn, error);
+		} else {
+			for (let entry of turn.pending_entries) {
+				this.append(entry);
+			}
+			this.record_turn(p, steps, plan);
+		}
+	},
+
+	finish_interrupted_turn: function(turn) {
+		if (turn.p.cfg.leak_test) {
+			this.reject_turn(turn, "the turn was interrupted before leak checking completed");
+		} else {
+			this.record_turn(turn.p, turn.steps);
+		}
+	},
+
+	reject_turn: function(turn, reason) {
+		let {p, steps} = turn;
+		let entry = this.prepare_turn(p, steps).entries[0];
+		entry.action = "rejected";
+		entry.withheld = entry.text || entry.withheld;
+		entry.text = "";
+		entry.leak_error = reason;
+		p.turns++;
+		this.turn_count++;
+		this.note_floor(p);
+		// Keep the host's audit trail, but no announcement from this turn is published.
+		for (let pending of turn.pending_entries || []) {
+			this.append(Object.assign({}, pending, {announce: "", withheld_announce: pending.announce || ""}));
+		}
+		this.append(entry);
+		for (let it of steps.flatMap(s => s.library || [])) {
+			this.library_opened.delete(it.name.toLowerCase());
+		}
+		// Rejected envelopes must not become visible through a later peek or automatic opening.
+		this.envelopes.list = turn.envelopes_before;
+		this.remove(p, "removed", false);
+		this.notice(`${p.name}'s reply was rejected due to an error, so ${p.name} has been removed from the room for the rest of the session. The room carries on.`);
+		this.warn(`${p.name}: ${reason}. The rejected reply is kept in the JSONL transcript only.`);
 	},
 
 	note_floor: function(p) {
@@ -1088,11 +1195,8 @@ const room_prototype = {
 		return {content: lines.join("\n"), is_error: false, summary: "host checked the room status"};
 	},
 
-	record_turn: function(p, steps) {
-
-		p.turns++;
-		this.turn_count++;
-		this.note_floor(p);
+	prepare_turn: function(p, steps) {
+		let entries = [];
 
 		let refusal = steps.map(s => s.refusal).find(Boolean) || null;
 		let withheld = refusal ? steps.map(s => (s.text || s.withheld || "").trim()).filter(Boolean).join("\n\n") : "";
@@ -1106,7 +1210,7 @@ const room_prototype = {
 		let costs = steps.map(s => s.cost);
 		let last = steps[steps.length - 1];
 
-		this.append({
+		entries.push({
 			kind: "turn",
 			author: p.name,
 			action: action,
@@ -1128,18 +1232,39 @@ const room_prototype = {
 
 		let renders = refusal ? [] : steps.flatMap(s => s.renders || []);
 		if (renders.length > 0) {
-			this.append({kind: "render", author: p.name, images: renders});
+			entries.push({kind: "render", author: p.name, images: renders});
 		}
 		let opened = steps.flatMap(s => s.library || []);
-		if (refusal) {
-			for (let it of opened) {					// Never shown, so anyone may still open it.
-				this.library_opened.delete(it.name.toLowerCase());
-			}
-		} else if (opened.length > 0) {
-			this.append({kind: "library", author: p.name, items: opened, images: opened.filter(it => it.kind === "image")});
+		if (!refusal && opened.length > 0) {
+			entries.push({kind: "library", author: p.name, items: opened, images: opened.filter(it => it.kind === "image")});
+		}
+		let after_turn = entries.length;
+		if (sit_out) {
+			entries.push({kind: "notice", text: `${p.name} is sitting out, and won't take turns until someone @mentions them.`});
+		}
+		if (call_host && this.cfg.host_present && !this.closing) {
+			entries.push({kind: "notice", text: `${p.name} has handed the floor to ${this.cfg.host_name}, and the room is waiting for their reply.`});
+		}
+		if (action === "leave") {
+			entries.push(...this.removal_entries(p, "left"));
+			entries.push({kind: "notice", text: `${p.name} has left the room.`});
+		}
+		return {entries, after_turn, text, refusal, withheld, opened, sit_out, call_host, action};
+	},
+
+	record_turn: function(p, steps, plan = this.prepare_turn(p, steps)) {
+		let {text, refusal, withheld, opened, sit_out, call_host, action} = plan;
+		p.turns++;
+		this.turn_count++;
+		this.note_floor(p);
+		for (let entry of plan.entries.slice(0, plan.after_turn)) {
+			this.append(entry);
 		}
 
 		if (refusal) {
+			for (let it of opened) {
+				this.library_opened.delete(it.name.toLowerCase());
+			}
 			this.notice(`${p.name}'s API ended their reply with a refusal, so ${p.name} has been removed from the room for the rest of the session.${withheld ? " Nothing from that reply was passed on." : ""} The room carries on.`);
 			this.warn(`${p.name} was removed after a refusal: ${refusal}.${withheld ? ` The reply's text (${withheld.length} characters) is kept in the JSONL transcript only.` : ""}`);
 			this.remove(p, "removed");
@@ -1155,23 +1280,27 @@ const room_prototype = {
 		if (sit_out) {
 			p.sitting_out = true;
 			this.floor_queue = this.floor_queue.filter(n => n !== p.name);
-			this.notice(`${p.name} is sitting out, and won't take turns until someone @mentions them.`);
 		}
 
 		if (call_host && this.cfg.host_present && !this.closing) {
 			this.awaiting_host = p.name;
-			this.notice(`${p.name} has handed the floor to ${this.cfg.host_name}, and the room is waiting for their reply.`);
 		}
 
 		if (action === "leave") {
-			this.remove(p, "left");
-			this.notice(`${p.name} has left the room.`);
+			this.remove(p, "left", false);
+			for (let e of this.envelopes.unopened_sealed(p.name)) {
+				e.opened = true;
+			}
+		}
+		// Apply the actions before announcing them, so listeners see the updated room state.
+		for (let entry of plan.entries.slice(plan.after_turn)) {
+			this.append(entry);
 		}
 	},
 
 	// Takes a model out of the room for good: how is "left" or "removed" (after a refusal).
 
-	remove: function(p, how) {
+	remove: function(p, how, announce_envelopes = true) {
 		p.present = false;
 		p.sitting_out = false;
 		this.floor_queue = this.floor_queue.filter(n => n !== p.name);
@@ -1183,14 +1312,22 @@ const room_prototype = {
 		// The others stay closed, since anyone can open those when the time comes (opening a
 		// bid early, before everyone's are in, would spoil the round).
 
-		for (let e of this.envelopes.unopened_sealed(p.name)) {
-			e.opened = true;
-			this.append({
-				kind: "tool_op", author: p.name, tool: "open_envelope", is_error: false,
-				summary: `${how === "left" ? "left" : "was removed"} with a sealed envelope unopened, so the room opened ${describe_opened(e)}`,
-				announce: `${p.name} ${how === "left" ? "is leaving" : "has been removed"}, so the room has opened ${describe_opened(e)}`,
-			});
+		if (announce_envelopes) {
+			for (let entry of this.removal_entries(p, how)) {
+				this.append(entry);
+			}
+			for (let e of this.envelopes.unopened_sealed(p.name)) {
+				e.opened = true;
+			}
 		}
+	},
+
+	removal_entries: function(p, how) {
+		return this.envelopes.unopened_sealed(p.name).map(e => ({
+			kind: "tool_op", author: p.name, tool: "open_envelope", is_error: false,
+			summary: `${how === "left" ? "left" : "was removed"} with a sealed envelope unopened, so the room opened ${describe_opened(e)}`,
+			announce: `${p.name} ${how === "left" ? "is leaving" : "has been removed"}, so the room has opened ${describe_opened(e)}`,
+		}));
 	},
 
 	// --------------------------------------------------------------------------------------------
@@ -1365,7 +1502,7 @@ const room_prototype = {
 		let turn = this.turn_in_progress;			// Record what the interrupted turn already did,
 		this.turn_in_progress = null;				// before "closed" lets the front end exit.
 		if (turn && turn.steps.length > 0) {
-			this.record_turn(turn.p, turn.steps);
+			this.finish_interrupted_turn(turn);
 		}
 		this.reveal_unopened_to_host();
 		this.notice("The room was closed by the host.");

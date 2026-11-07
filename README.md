@@ -111,6 +111,22 @@ For Gemini, use a key from a **paid** account. Google's terms say free-tier prom
 
 ## Config
 
+To check a model's public turns for accidentally leaked hidden thinking, set `"leak_test": true` in that model's settings and configure a separate top-level checker:
+
+```json
+"leak_checker": {
+	"model": "claude-haiku-5-5",
+	"provider": "anthropic",
+	"max_tokens": 16000,
+	"effort": "low",
+	"prices": null
+}
+```
+
+The checker uses the configured API key for its provider and never takes a seat in the room. Each check is a fresh request with no conversation history or tools. Its sole question is whether the text appears to accidentally leak hidden thinking, with a strict JSON boolean answer. The input uses the same rendering as the other models' view: the message, public tool announcements, room actions, attachment labels, and opened library text. Private thinking, private tool results and notes to the host are excluded; image pixels are not part of this text check.
+
+The turn stays unpublished until the checker returns `{"leaked_thinking": false}`. A positive answer, malformed answer, refusal, truncated answer or failed check withholds the turn and removes its author for the rest of the session. The room sees: *&lt;name&gt;'s reply was rejected due to an error, so &lt;name&gt; has been removed from the room for the rest of the session. The room carries on.* Interrupted turns are also withheld. Rejected text remains in the host's JSONL audit log. Tool announcements are held until approval, and rejected envelope changes are discarded; file tools still execute during the turn, so file writes are not rolled back. Checker usage counts toward the session budget. `leak_test` defaults to `false`, and `leak_checker` to `null`.
+
 | Key | Default | |
 | --- | --- | --- |
 | `anthropic_api_key_file` | | Path to a file containing your Anthropic API key, needed if any active model is a Claude model. `~` works. Relative paths you write in the config are relative to the config file; the defaults below are relative to this program's folder. |
@@ -135,6 +151,7 @@ For Gemini, use a key from a **paid** account. Google's terms say free-tier prom
 | `cache_ttl` | `"5m"` | `"1h"` if turns are often more than 5 minutes apart. |
 | `models` | | Every model you might seat, as an object: each key is that model's name in the room (one word, used for @mentions), and each value has `model` (the API model ID), `full_name`, `max_tokens` (thinking + reply), `effort` (for Claude, `low` to `max`; for Gemini, `minimal` to `high`; for OpenAI, `none` to `max`; or `""` for the model's default) and `prices` (`null` for the built-in table, or an object of `input`, `cache_write_5m`, `cache_write_1h`, `cache_read` and `output`, in dollars per million tokens). `provider` (`"anthropic"`, `"google"` or `"openai"`) and `company` are worked out from the model ID if left out. Every entry is checked, active or not, so typos show up straight away. |
 | `active` | `[]` | Names of the models in this session, in the order they're introduced. Empty seats them all. `--active` overrides it. |
+| `leak_checker` | `null` | Separate checker settings: `model`, optional `provider`, `max_tokens` (default 16000), `effort` and `prices`. Required when any model enables `leak_test`. |
 
 System prompt placeholders: `{{name}}`, `{{full_name}}`, `{{company}}`, `{{host_name}}`, `{{participants}}`, `{{record_note}}`, `{{date}}` (the date and clock time the session started, in your time zone, e.g. "Friday, October 16, 2026, at 2:31 PM BST").
 
