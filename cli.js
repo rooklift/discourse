@@ -281,6 +281,13 @@ async function main() {
 				print(`  ${n.author}${n.reply === "when you can" ? " (reply when you can)" : ""}: ${n.text}`);
 			}
 		}
+		let removals = room.removals_for_host();
+		if (removals.length > 0) {
+			print(paint(`Removed from the room this session (${removals.length}):`, 33));
+			for (let r of removals) {
+				print(`  ${r.name}: ${r.reason}`);
+			}
+		}
 		print(dim(`Total cost: ${money(room.total_cost)}${room.cost_known ? "" : " (incomplete)"}${room.cost_split()}`));
 		print(dim(`Transcript: ${files.md_path}`));
 		if (rl) {

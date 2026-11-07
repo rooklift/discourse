@@ -3203,6 +3203,27 @@ test("leak check: API refusals and quitting mid-generation need no check, and no
 	}
 });
 
+test("removals: refusals and leak-check rejections are listed for the host when the room closes", async () => {
+	let backend = fake_backend((name, req) => {
+		if (name === "Leak checker") return verdict(true);
+		if (name === "Sonnet") return Object.assign(speak("no"), {stop_reason: "refusal", refusal: "policy"});
+		return speak(`${name} here`);
+	});
+	let cfg = checked_cfg({opening_message: "Hello", farewell_round: false, transcript_dir: temp_dir()});
+	let room = new_room(cfg, backend, {template: "x", random: () => 0});
+	let files = require("../src/transcript").attach_transcript(room, cfg);
+	await room.run();
+	let expected = [
+		{name: "Opus", reason: "the leak check rejected a reply (the leak checker detected leaked hidden thinking)"},
+		{name: "Sonnet", reason: "their API refused a reply (policy)"},
+	];
+	assert.deepStrictEqual(room.removals_for_host(), expected);
+	let md = fs.readFileSync(files.md_path, "utf8");
+	assert(md.includes("Removed from the room:\n\n- Opus: the leak check rejected a reply (the leak checker detected leaked hidden thinking)\n- Sonnet: their API refused a reply (policy)\n\nTotal cost:"), md);
+	let summary = fs.readFileSync(files.jsonl_path, "utf8").trim().split("\n").map(l => JSON.parse(l)).find(e => e.kind === "summary");
+	assert.deepStrictEqual(summary.removals, expected);
+});
+
 test("config: leak checker is separate, validated, priced and loads its provider's key only when used", () => {
 	let {load_config, read_api_keys} = require("../src/config");
 	let dir = temp_dir();

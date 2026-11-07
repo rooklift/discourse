@@ -251,6 +251,20 @@ const room_prototype = {
 		return notes;
 	},
 
+	// Models removed from the room this session, rather than leaving: [{name, reason}], in order.
+
+	removals_for_host: function() {
+		let removals = [];
+		for (let e of this.log) {
+			if (e.kind === "turn" && e.action === "refused") {
+				removals.push({name: e.author, reason: `their API refused a reply (${e.refusal})`});
+			} else if (e.kind === "turn" && e.action === "rejected") {
+				removals.push({name: e.author, reason: `the leak check rejected a reply (${e.leak_error})`});
+			}
+		}
+		return removals;
+	},
+
 	// " (Anthropic $0.47, Google $0.21)" when more than one company is in the room, else "".
 
 	cost_split: function() {
