@@ -3222,6 +3222,9 @@ test("removals: refusals and leak-check rejections are listed for the host when 
 	assert(md.includes("Removed from the room:\n\n- Opus: the leak check rejected a reply (the leak checker detected leaked hidden thinking)\n- Sonnet: their API refused a reply (policy)\n\nTotal cost:"), md);
 	let summary = fs.readFileSync(files.jsonl_path, "utf8").trim().split("\n").map(l => JSON.parse(l)).find(e => e.kind === "summary");
 	assert.deepStrictEqual(summary.removals, expected);
+	assert(room.turn_count > 0);
+	assert.strictEqual(summary.turn_count, room.turn_count);
+	assert(new RegExp(`\\nTotal cost: \\$\\d+\\.\\d\\d\\. Turns: ${room.turn_count}\\.\\n`).test(md), md);
 });
 
 test("config: leak checker is separate, validated, priced and loads its provider's key only when used", () => {

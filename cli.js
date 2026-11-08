@@ -288,7 +288,7 @@ async function main() {
 				print(`  ${r.name}: ${r.reason}`);
 			}
 		}
-		print(dim(`Total cost: ${money(room.total_cost)}${room.cost_known ? "" : " (incomplete)"}${room.cost_split()}`));
+		print(dim(`Total cost: ${money(room.total_cost)}${room.cost_known ? "" : " (incomplete)"}${room.cost_split()}. Turns: ${room.turn_count}.`));
 		print(dim(`Transcript: ${files.md_path}`));
 		if (rl) {
 			rl.close();

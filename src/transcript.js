@@ -87,8 +87,8 @@ function attach_transcript(room, cfg) {
 		let removals_md = removals.length > 0
 			? `Removed from the room:\n\n${removals.map(r => `- ${r.name}: ${r.reason}`).join("\n")}\n\n`
 			: "";
-		write_md(`---\n\n${notes_md}${removals_md}Total cost: ${total}${split}\n\n${lines.join("\n")}\n`);
-		write_json({kind: "summary", total_cost: room.total_cost, cost_known: room.cost_known, providers: groups, removals,
+		write_md(`---\n\n${notes_md}${removals_md}Total cost: ${total}${split}. Turns: ${room.turn_count}.\n\n${lines.join("\n")}\n`);
+		write_json({kind: "summary", total_cost: room.total_cost, cost_known: room.cost_known, turn_count: room.turn_count, providers: groups, removals,
 			participants: room.participants.map(p => ({name: p.name, turns: p.turns, cost: p.cost, usage: p.usage})),
 			leak_checker: room.leak_checker ? {cost: room.leak_checker.cost, usage: room.leak_checker.usage} : null});
 	});
