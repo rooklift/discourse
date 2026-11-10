@@ -2,7 +2,7 @@
 
 // Prices in dollars per million tokens, from https://platform.claude.com/docs/en/about-claude/pricing
 // https://ai.google.dev/gemini-api/docs/pricing and https://developers.openai.com/api/docs/pricing
-// (Claude prices checked November 2026, the rest October 2026; Gemini and OpenAI prices are the standard tier). A participant can override these with a "prices" object in config.json.
+// (Claude and Gemini 4 prices checked November 2026, the rest October 2026; Gemini and OpenAI prices are the standard tier). A participant can override these with a "prices" object in config.json.
 //
 // Each entry is a list of tiers. A request uses the first tier whose up_to is at least the
 // request's total prompt length (uncached input + cache reads + cache writes).
@@ -31,6 +31,10 @@ const PRICES = {
 	// Gemini caching is implicit: there's no charge for writing to the cache, only a lower price
 	// for reading from it. (Explicit caching, which bills storage, isn't used.)
 
+	"gemini-4-carbon": [
+		{until: "2026-12-01", tiers: [gemini(2, 10, 0.10)]},
+		{tiers: [gemini(4, 20, 0.20)]},
+	],
 	"gemini-4-argon": [
 		{until: "2026-12-01", tiers: [gemini(2, 10, 0.10)]},
 		{tiers: [gemini(4, 20, 0.20)]},

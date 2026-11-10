@@ -157,7 +157,7 @@ System prompt placeholders: `{{name}}`, `{{full_name}}`, `{{company}}`, `{{host_
 
 ## Costs
 
-Prices for current models are built in (`src/pricing.js`, Claude prices checked November 2026, the rest October 2026), including Gemini's already-announced rises (Gemini 4 Argon doubles on 1 December 2026, the 3.8 and 3.6 Flash models on 1 January 2027); add a `prices` object to a model's settings for anything else. Costs are computed from the `usage` the API reports, including cache reads and writes.
+Prices for current models are built in (`src/pricing.js`, Claude and Gemini 4 prices checked November 2026, the rest October 2026), including Gemini's already-announced rises (Gemini 4 Carbon and Argon double on 1 December 2026, the 3.8 and 3.6 Flash models on 1 January 2027); add a `prices` object to a model's settings for anything else. Costs are computed from the `usage` the API reports, including cache reads and writes.
 
 Every model rereads the whole conversation on each turn, so input dominates. For Claude, automatic prompt caching (one top-level `cache_control`) means each turn mostly pays the cheap cache-read rate for everything already seen. Gemini caches implicitly, at a tenth of the input price, with no charge for writing to the cache. OpenAI caches automatically too, charging 1.25x input for cache writes and a tenth for reads; above 272K prompt tokens, a whole OpenAI request is priced higher.
 
