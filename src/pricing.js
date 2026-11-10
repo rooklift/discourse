@@ -2,7 +2,7 @@
 
 // Prices in dollars per million tokens, from https://platform.claude.com/docs/en/about-claude/pricing
 // https://ai.google.dev/gemini-api/docs/pricing and https://developers.openai.com/api/docs/pricing
-// (all checked October 2026; Gemini and OpenAI prices are the standard tier). A participant can override these with a "prices" object in config.json.
+// (Claude prices checked November 2026, the rest October 2026; Gemini and OpenAI prices are the standard tier). A participant can override these with a "prices" object in config.json.
 //
 // Each entry is a list of tiers. A request uses the first tier whose up_to is at least the
 // request's total prompt length (uncached input + cache reads + cache writes).
@@ -11,6 +11,9 @@
 // instead, each with the date it ends ("until", exclusive) and its tiers.
 
 const PRICES = {
+	"claude-fable-5-2": [
+		{up_to: Infinity, input: 8, cache_write_5m: 10, cache_write_1h: 16, cache_read: 0.20, output: 40},
+	],
 	"claude-fable-5-1": [
 		{up_to: Infinity, input: 10, cache_write_5m: 12.5, cache_write_1h: 20, cache_read: 0.25, output: 50},
 	],
