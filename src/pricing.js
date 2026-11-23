@@ -39,6 +39,8 @@ const PRICES = {
 		{until: "2026-12-01", tiers: [gemini(2, 10, 0.10)]},
 		{tiers: [gemini(4, 20, 0.20)]},
 	],
+	"gemini-4-neon": [gemini(3, 15, 0.15)],
+	"gemini-4-hydrogen": [gemini(1.50, 7.50, 0.075)],
 	"gemini-3.8-flash": [
 		{until: "2027-01-01", tiers: [gemini(0.75, 3.75, 0.075)]},
 		{tiers: [gemini(1.50, 7.50, 0.15)]},

@@ -2104,6 +2104,8 @@ test("pricing: Gemini prices, including the scheduled rises", () => {
 	assert.strictEqual(at("gemini-3.8-flash", "2027-01-01T00:00:00Z").toFixed(3), "9.150");
 	assert.strictEqual(at("gemini-4-argon", "2026-11-30T12:00:00Z").toFixed(2), "12.10");
 	assert.strictEqual(at("gemini-4-argon", "2026-12-01T12:00:00Z").toFixed(2), "24.20");
+	assert.strictEqual(at("gemini-4-neon", "2026-12-01T12:00:00Z").toFixed(2), "18.15");
+	assert.strictEqual(at("gemini-4-hydrogen", "2026-12-01T12:00:00Z").toFixed(3), "9.075");
 	let long = {input_tokens: 250000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 0};
 	assert.strictEqual(pricing.cost_of_usage(pricing.tiers_for("gemini-3.1-pro-preview", null), long, "5m").toFixed(2), "1.00", "over 200k uses the long-prompt tier");
 });
